@@ -26,17 +26,9 @@ func (p *pool) get() []byte {
 }
 ```
 
-现象非常"不像 bug"：
+现象非常"不像 bug"：**测试里 100% 通过**，`-race` 也不报；生产偶发——读出来的字节对不上，而且**只在负载高的时候**；加了日志之后复现率变低（典型的海森堡 bug）。
 
-- **在测试里 100% 通过**，`-race` 也不报；
-- 生产环境偶发：读出来的字节内容对不上，而且**只在负载高的时候**；
-- 加了日志之后复现率变低（典型的海森堡 bug 特征）。
-
-原因只有一句话：**`uintptr` 是一个整数，不是指针。** 它不构成引用，GC 完全不知道它指向什么。于是：
-
-1. **对象可能在两次使用之间被回收**——`uintptr` 不算"可达"，GC 眼里那块内存是垃圾；
-2. **对象可能被移动**——Go 的 GC 不搬堆对象，但 **goroutine 的栈会增长并整块复制**（`runtime/stack.go` 的 `copystack`）。如果这块 `[]byte` 是**在栈上分配的小数组**，栈一变，`uintptr` 就指向了旧地址；
-3. 高负载时栈增长/GC 更频繁 → 命中率更高。加了日志改动了内联和栈布局 → 复现率变化。
+原因只有一句话：**`uintptr` 是一个整数，不是指针。** ① 它不构成引用，GC 眼里那块内存是垃圾，随时可能被回收；② Go 的 GC 不搬堆对象，但 **goroutine 的栈会增长并整块复制**（`runtime/stack.go` 的 `copystack`），`uintptr` 若指向栈上对象，栈一变就指向旧地址；③ 高负载时栈增长/GC 更频繁 → 命中率更高，而加日志改动了内联与栈布局 → 复现率就变了。
 
 正确写法只有一种：**要么在同一表达式里完成转换（让编译器看到"这里有个活指针"），要么用 `unsafe.Pointer` 而不是 `uintptr` 长期持有，要么老老实实存切片。**
 
@@ -172,14 +164,7 @@ go run -race main.go                                     # -race 自动开启 ch
 go build -gcflags=all=-d=checkptr=1 -o app .             # 显式开启
 ```
 
-它能在运行时报出两类经典错误：
-
-```
-fatal error: checkptr: pointer arithmetic result points to invalid allocation
-fatal error: checkptr: converted pointer straddles multiple allocations
-```
-
-这意味着 **`unsafe` 代码必须在 `-race` 下跑通**——这是 CI 里唯一能自动发现大部分 `unsafe` 错误的机制。但注意：**`checkptr` 抓不到"`uintptr` 悬空"和"`[]byte` 里藏指针"这两类逻辑错误**（它只能验证指针运算的范围），所以 16.1 那种 bug 它管不了。
+它能在运行时报出 `checkptr: pointer arithmetic result points to invalid allocation`、`checkptr: converted pointer straddles multiple allocations` 两类错误。所以**`unsafe` 代码必须在 `-race` 下跑通**——这是 CI 里唯一能自动发现大部分 `unsafe` 错误的机制。但它**抓不到"`uintptr` 悬空"和"`[]byte` 里藏指针"**，16.1 那种 bug 它管不了。
 
 ---
 
@@ -214,31 +199,13 @@ func parse(buf []byte) (*msghdr, error) {
 | **字节序明确** | 大端机器读出来是乱码 | 显式用 `binary.BigEndian`/`LittleEndian`，或加魔数 + 字节序字段 |
 | **不含 Go 指针** | **GC 看不见里面的指针** → 悬空指针 / 内存泄漏 | 只用纯数值/POD 结构体；`[]byte` 是 noscan 的 |
 
-第四条最致命，也最容易被忽略：**`[]byte` 的底层数组在 GC 眼里是"没有指针的内存"**（`noscan`）。你往里塞一个 `unsafe.Pointer` 或用重解释的 struct 存指针，GC 就完全不知道"这里有个引用"，那个对象会被回收，而你手里的指针还指着它——这是**真正意义上的内存不安全**，`-race` 也救不了你。
+第四条最致命：**`[]byte` 的底层数组在 GC 眼里是"没有指针的内存"**（`noscan`）。你往里塞 `unsafe.Pointer`、或用重解释的 struct 存指针，GC 完全不知道"这里有个引用"，对象会被回收而你手里的指针还指着它——这是**真正意义上的内存不安全**，`-race` 也救不了你。
 
 > 💡 **保守做法**：需要"字节 ↔ 结构体"的场景，先问一遍**能不能用 `encoding/binary`**（`binary.Read` / `binary.LittleEndian.PutUint64`）。它的开销是几个函数调用，而 `unsafe` 的代价是"只要有一个 dev 写错，就是线上随机崩溃"。**只有当你被 pprof 证明这段是热点（比如每秒百万次的报文解析）时，才升级到 `unsafe`。**
 
 ### 16.3.2 零拷贝序列化：sonic 为什么快
 
-高性能 JSON 库（`bytedance/sonic`）之所以能比 `encoding/json` 快好几倍，靠的就是三件事的组合：
-
-1. **零拷贝取字段**：不把 `[]byte` 转成 `string`，直接在原 buffer 上扫描（`unsafe.String`/`unsafe.Pointer` 做窗口）；
-2. **JIT/汇编的解码器**：按 schema 生成专用的解析代码，避免反射；
-3. **手写编码器**：直接在预分配 buffer 上 `append`，用 `unsafe` 把 `[]byte` 直接重解释成 string 塞进结果结构体。
-
-```go
-// 零拷贝解码的最小心智模型（真实库复杂得多）
-type field struct {
-	raw []byte // ⚠️ 指向原始 JSON buffer 的一段
-}
-
-// 如果直接 unsafe.String(field.raw)，返回的 string 与 buffer 共享内存：
-// 调用方一旦复用/释放 buffer，所有 string 一起变成垃圾。
-// sonic 的做法：默认要求调用方保证 []byte 在整个使用期内存活；
-// 需要长期持有时显式 CopyString。
-```
-
-这条边界很清楚：**`unsafe` 的零拷贝把"内存生命周期"的责任从 runtime 转移给了调用方**。库能做的只是把这个契约写进文档和 API 设计里（`Valid` vs `CopyString` 两个函数名就是契约本身）。
+高性能 JSON 库（`bytedance/sonic`）比 `encoding/json` 快好几倍，靠三件事的组合：**零拷贝取字段**（不把 `[]byte` 转成 `string`，直接在原 buffer 上扫描）、**按 schema 生成专用解码代码**（避免反射）、**手写编码器**（在预分配 buffer 上 `append`）。代价仍是那条铁律：**零拷贝把"内存生命周期"的责任从 runtime 转移给了调用方**——库能做的只是把契约写进 API（`Valid` vs `CopyString` 两个函数名就是契约本身）。
 
 ---
 
@@ -260,7 +227,7 @@ Go 代码调用 C 函数：
    C 返回 ──► 尝试重新获取 P（exitsyscall）；拿不到就入全局队列等待
 ```
 
-对 Java 工程师来说，这段流程很眼熟：**就是 JNI**。JNI 也要把线程状态切到 native、也要防止 GC 在你操作裸指针时移动对象；区别在于 Go 多了一层 **"M 与 P 解绑"**（因为 Go 的 P 是稀缺资源，数量 = `GOMAXPROCS`，而线程可以有很多）。
+对 Java 工程师来说这段很眼熟：**就是 JNI**——JNI 也要把线程状态切到 native、也要防止 GC 在你操作裸指针时移动对象。区别是 Go 多了一层 **"M 与 P 解绑"**：P 是稀缺资源（数量 = `GOMAXPROCS`），而线程可以有很多。
 
 ### 16.4.2 成本清单（按真实影响排序）
 
@@ -362,10 +329,10 @@ func goCallback(h C.uintptr_t) {
 
 **更好的替代方案（顺序即优先级）：**
 
-1. **纯 Go 重写**（Go 标准库的 `crypto`、`compress`、`image` 都是这样从 C 迁过来的）；
-2. **把 C/C++ 做成独立进程**，通过 gRPC / stdin-stdout 通信——**MCP 的 stdio transport 就是这个思路的极致应用**：推理引擎跑在独立进程里，Go 只负责协议，崩溃隔离、可独立扩缩容、零 cgo；
-3. **WASM**（`wazero`，纯 Go 实现的 WASM runtime），把 C 库编译成 wasm 后加载，代价是性能损失和移植工作量；
-4. 只有在上面都不行时，才在**库的最底层**开一扇 cgo 的门，并在 API 边界上把 `[]byte` 与 `C.malloc` 的细节全部封装掉。
+1. **纯 Go 重写**（标准库的 `crypto`、`compress`、`image` 都是这样从 C 迁过来的）；
+2. **把 C/C++ 做成独立进程**，通过 gRPC / stdio 通信——**MCP 的 stdio transport 就是这个思路的极致应用**：推理引擎跑在独立进程里，Go 只负责协议，崩溃隔离、可独立扩缩容、零 cgo；
+3. **WASM**（`wazero`，纯 Go 的 WASM runtime），代价是性能损失与移植工作量；
+4. 都不行时，才在**库的最底层**开一扇 cgo 的门，并把 `[]byte` 与 `C.malloc` 的细节全部封装掉。
 
 ---
 
@@ -383,13 +350,13 @@ func goCallback(h C.uintptr_t) {
 
 **四个会猜错的地方：**
 
-**① Go 的 `unsafe` 比 Java 的 `Unsafe` 弱得多，也安全得多。** Java 的 `Unsafe` 是"绕过 JVM 做一切"：定义类、改字段、CAS、堆外分配。Go 的 `unsafe` 只有"把这块内存当成另一个类型看"。**你不能用 `unsafe` 改一个 `const`、不能做原子操作、不能直接改别的包的私有字段**（后者只能靠 `//go:linkname` 这种更黑的招，业务代码禁用）。想"突破封装"时，Go 的答案是**重新设计 API**，而不是 `unsafe`。
+**① Go 的 `unsafe` 比 Java 的 `Unsafe` 弱得多，也安全得多。** Java 的 `Unsafe` 能定义类、改字段、CAS、堆外分配；Go 的 `unsafe` 只有"把这块内存当成另一个类型看"——**不能改 `const`、不能做原子操作、不能直接改别的包的私有字段**（后者只能靠 `//go:linkname`，业务代码禁用）。想突破封装时，Go 的答案是**重新设计 API**。
 
-**② "Go 的 cgo 只是 JNI 的 Go 版"——少了半句。** JNI 的成本主要是"线程状态切换 + GC 屏障"；cgo 的成本还要加上 **"P 的解绑"**。因为 P 的数量 = `GOMAXPROCS` 是硬资源，一个长时间阻塞的 C 调用会让整个 P 闲置（`sysmon` 会 `retake` 并起新 M），这在 Java 里是"线程池多一个线程"的事，在 Go 里是"调度器要多调度一轮"的事（详见第 19 章）。
+**② "cgo 就是 JNI 的 Go 版"——少了半句。** JNI 的成本是"线程状态切换 + GC 屏障"；cgo 还要加上 **"P 的解绑"**。P 的数量 = `GOMAXPROCS` 是硬资源，一个长时间阻塞的 C 调用会让整个 P 闲置（`sysmon` 会 `retake` 并起新 M）。这在 Java 里是"线程池多一个线程"，在 Go 里是"调度器要多跑一轮"（详见第 19 章）。
 
 **③ 静态链接这件事在两边是反的。** JVM 生态早就习惯"fat jar + JRE 镜像"，没人指望单文件；Go 的招牌恰恰是"CGO_ENABLED=0 → 一个 10MB 静态二进制扔进 scratch 镜像"。**一旦引入 cgo，你就丢掉了 Go 最核心的部署优势**——这是架构评审里最该问的一句话。
 
-**④ 两者共同的坑：native 内存不在 GC 视野内。** JVM 的堆外泄漏要靠 `Native Memory Tracking`（`-XX:NativeMemoryTracking=summary` + `jcmd VM.native_memory`）；Go 的 cgo 泄漏**连这个都没有**，`pprof heap` 完全看不到 `C.malloc` 的内存。唯一的手段是给封装层加计数、或用 `C.malloc` 时注册到自己的账本里。
+**④ 两者共同的坑：native 内存不在 GC 视野内。** JVM 的堆外泄漏还能靠 `Native Memory Tracking`（`-XX:NativeMemoryTracking=summary` + `jcmd VM.native_memory`）；Go 的 cgo 泄漏**连这个都没有**，`pprof heap` 完全看不到 `C.malloc` 的内存。唯一手段是封装层自己记账。
 
 ---
 
@@ -404,7 +371,7 @@ func goCallback(h C.uintptr_t) {
 │  可静态编译、可秒级扩容│                 │  崩溃隔离、可独立限流  │
 └─────────────────────┘                  └──────────────────────┘
 ```
-代价是一次进程间序列化；收益是：主进程保持"零 cgo"，模型进程可以独立重启、独立 GPU 配额、独立更新。**这就是 MCP 协议在 Go 世界爆发的真正原因——它是 cgo 的架构级替代品。**
+代价是一次进程间序列化；收益是：主进程保持"零 cgo"，模型进程可独立重启、独立 GPU 配额、独立更新。**这就是 MCP 在 Go 世界爆发的真正原因——它是 cgo 的架构级替代品。**
 
 **② 高性能路径的封装原则：`unsafe` 只能出现在叶子包，且必须有 `Safe` API。**
 
@@ -446,8 +413,7 @@ func String(b []byte) string { return string(b) }
 | 8 | 引入 cgo 后镜像从 15MB 变 90MB、交叉编译失败 | cgo 需要 C 工具链与动态库 | 尽量 `CGO_ENABLED=0`；必要时多阶段构建 + 静态链接 libc | 第 52 章 |
 | 9 | cgo 服务 goroutine/线程数异常增长 | C 调用阻塞 → `sysmon` `startm` 起新 M | 批量调用、加超时、把长阻塞移出请求路径 | 16.4.1 / 第 19 章 |
 | 10 | `//export` 的回调里 panic，整个进程挂掉 | Go 回调 C 再回调 Go，栈与恢复边界断裂 | 回调内 `defer recover()`，绝不把 panic 漏到 C 边界 | 16.4.3 |
-| 11 | 用 `//go:linkname` 访问标准库私有函数，升级 Go 版本后崩 | 无兼容性保证的"黑魔法" | 业务代码禁用；真要封装就自己实现或用 `unsafe` 正规接口 | 16.5 |
-| 12 | `unsafe` 代码躲在业务包里遍地开花 | 无法审计、无法集中替换 | `unsafe` 只出现在 `internal/` 叶子包，且有 Safe 版本 | 16.6 |
+| 11 | 用 `//go:linkname` 访问标准库私有函数，升级 Go 版本后崩 | 无兼容性保证的"黑魔法" | 业务代码禁用 | 16.5 |
 
 ---
 
@@ -465,20 +431,18 @@ func String(b []byte) string { return string(b) }
 | cgo 单次成本 | 约 40~80ns；还能接受，但"× 百万次"就是灾难 |
 | cgo 的真正代价 | M 与 P 解绑 → 线程膨胀；GC 进度受拖累；**丢失静态单二进制** |
 | cgo 指针铁律 | Go 指针绝不指向含 Go 指针的内存交给 C；跨调用要 `cgo.Handle` / `runtime.Pinner` |
-| 什么时候用 | 大批量、低频次的成熟 C 库 / 推理引擎 FFI |
-| 更好的替代 | 纯 Go 重写 > 独立进程（MCP stdio）> WASM（wazero）> cgo |
-| 工程纪律 | `unsafe` 只进 `internal` 叶子包；每个 `Unsafe*` 配 `Safe` 版本；CI 带 `-race` |
+| 什么时候用 | 大批量、低频次的成熟 C 库 / 推理引擎 FFI；其它场景：纯 Go 重写 > 独立进程（MCP stdio）> WASM > cgo |
 
 ## 16.9 自检题
 
-1. **`p := uintptr(unsafe.Pointer(&x))`，然后在 100 行之后 `(*int)(unsafe.Pointer(p))`。为什么这是错的？Go 的 GC 不是不移动堆对象吗？**
-   > 答案要点：两条独立原因。① **`uintptr` 不构成引用**：从转换那一刻起，GC 不再认为 `&x` 让 `x` 可达，`x` 可能被回收（如果它是堆对象且没有别的引用）。② **栈会移动**：如果 `x` 在栈上，goroutine 栈增长时 `copystack` 会整块复制栈并修正所有**已知指针**——但 `uintptr` 里的值不在修正范围，于是它指向旧栈地址（已废弃/被复用）。"GC 不搬堆对象"是对的，但它救不了栈，也救不了"无人引用"。正确写法：`unsafe.Pointer` 全程持有，或在**同一个表达式**里完成 uintptr 往返；跨语句就必须用 `runtime.KeepAlive` 之外的手段（存 `unsafe.Pointer`）。
+1. **`p := uintptr(unsafe.Pointer(&x))`，100 行之后再 `(*int)(unsafe.Pointer(p))`。为什么错？GC 不是不移动堆对象吗？**
+   > 两条独立原因。① **`uintptr` 不构成引用**：从转换那一刻起，GC 不再认为 `x` 可达，它可能被回收。② **栈会移动**：`x` 若在栈上，栈增长时 `copystack` 只修正**已知指针**，`uintptr` 里的值不在修正范围，于是指向已被废弃的旧栈地址。"GC 不搬堆对象"救不了栈，也救不了"无人引用"。正确写法：全程持有 `unsafe.Pointer`，或在**同一个表达式**里往返。
 
-2. **同事说："cgo 就是调个 C 函数，跟普通函数差不多，慢不了多少。"你怎么用三个数字反驳？**
-   > 答案要点：① **单次 ~40~80ns vs Go 调用 ~1~2ns**，差 30~80 倍；② **每次调用都会让 M 与 P 解绑**，C 阻塞时 `sysmon` 起新 OS 线程，线程数可能从 8 涨到几百；③ **`C.malloc` 的内存不在 GC 视野内**，泄漏时 `pprof heap` 显示一切正常。所以结论不是"cgo 慢"，而是"**过边界的次数**才是成本"——把 100 万次小调用变成 1 次大 buffer 调用，成本从 50ms 降到 0.1ms。
+2. **同事说："cgo 就是调个 C 函数，跟普通函数差不多。"你用哪三个事实反驳？**
+   > ① **单次 ~40~80ns vs Go 调用 ~1~2ns**，差 30~80 倍；② **每次调用都让 M 与 P 解绑**，C 阻塞时 `sysmon` 起新 OS 线程，线程数可能从 8 涨到几百；③ **`C.malloc` 的内存不在 GC 视野内**，泄漏时 `pprof heap` 显示一切正常。所以结论不是"cgo 慢"，而是"**过边界的次数**才是成本"。
 
-3. **你要把一个 C++ 的推理引擎接进 Go 的 Agent 服务。有哪三条路线？各自代价是什么？你会选哪条？**
-   > 答案要点：① **cgo 直接 FFI**：延迟最低，但 40~80ns/次、要处理指针规则（`cgo.Handle`/`runtime.Pinner`）、丢失 `CGO_ENABLED=0` 的静态单二进制、构建与调试复杂、C 崩溃直接带走整个进程。② **独立进程 + gRPC / MCP stdio**：多一次序列化 + 进程管理，但崩溃隔离、可独立扩缩容与升级、主进程保持纯 Go、可复用 MCP 生态。③ **WASM（wazero）**：纯 Go 加载，无需 C 工具链，但性能损失明显、移植成本高（需要把 C++ 编译成 wasm 且解决依赖）。选择依据：**推理是低频大批量、且模型/GPU 需要独立生命周期 → 选 ②**（这也是 MCP 在 Go 里流行的原因）；只有当你需要 sub-ms 级、且调用次数可控时，才在该库的最底层开 ① 这一扇门，并把 `unsafe`/cgo 细节全部封在 `internal` 里。
+3. **要把一个 C++ 推理引擎接进 Go Agent 服务，有哪三条路线？你选哪条？**
+   > ① **cgo 直接 FFI**：延迟最低，但要处理指针规则（`cgo.Handle`/`runtime.Pinner`）、丢失 `CGO_ENABLED=0` 的静态单二进制、C 崩溃直接带走进程。② **独立进程 + gRPC / MCP stdio**：多一次序列化与进程管理，换来崩溃隔离、独立扩缩容与升级、主进程保持纯 Go。③ **WASM（wazero）**：无需 C 工具链，但性能损失明显、移植成本高。**推理是低频大批量、且模型需要独立生命周期 → 选 ②**；只有需要 sub-ms 级且调用次数可控时，才在库最底层开 ① 这一扇门，并把细节封在 `internal` 里。
 
 ## 16.10 延伸阅读
 

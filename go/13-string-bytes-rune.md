@@ -2,7 +2,7 @@
 
 > **状态**：`已完成（初稿）` ｜ **所属**：第三部分 · 数据结构与内存 ｜ **编号**：13 / 54
 > **本章定位**：Go 的 `string` 是「16 字节 header + 一堆你无权修改的字节」，不是 Java 的 `String` 对象。这一章把 UTF-8、`len` vs 字符数、`Builder`、`unsafe.String` 零拷贝、拼接性能四条线一次打通，最后落到「流式处理大 prompt」。全章都在回答一个问题：**哪些地方会悄悄多分配一份内存。**
-> **读法**：13.2 的两张图标必须记住；13.4 的四种拼接方式对比建议自己跑一遍 bench；13.6 的坑表可以直接当 code review checklist。
+> **读法**：13.2 的两张图标必须记住；13.3.3 的四种拼接方式对比建议自己跑一遍 bench；13.6 的坑表可以直接当 code review checklist。
 
 ---
 
@@ -278,6 +278,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"unsafe"
 )
 
@@ -299,9 +300,13 @@ func main() {
 	b[0] = 'H'           // ⚠️ 现在 s 也变了
 	fmt.Println(s)       // Hello —— 因为 s 和 b 是同一块内存
 
-	bs := stringToBytes("world")
-	bs[0] = 'W'          // ⚠️ 后果自负（若底层是只读 rodata 会直接 SIGSEGV）
-	fmt.Println(string(bs))
+	// ⚠️ 反方向危险得多：返回的 []byte 与 string 共享同一段内存，
+	// 一旦写进去就破坏了"string 不可变"契约；如果底层是 rodata（字符串字面量
+	// 就是），直接 SIGSEGV。所以它只该用于"只读扫描"，比如解析器。
+	heapStr := strings.Join([]string{"world"}, "") // 保证在堆上，写不崩
+	bs := stringToBytes(heapStr)
+	bs[0] = 'W'
+	fmt.Println(string(bs)) // World —— 但这是 UB，别在业务代码里这么干
 	_ = unsafe.Sizeof(s) // 16
 }
 ```
@@ -367,7 +372,41 @@ func lastUserTurn(bigDoc string) string {
 
 ---
 
-## 13.4 踩坑清单（CR 可直接抄）
+## 13.4 Java 对照：会猜错的四件事
+
+长度语义的差异在 13.2.3 的表里已经给过了，这里只讲四个"能用 Java 直觉猜错、然后出线上问题"的地方。
+
+**① `substring` 是复制的，切片不是。** JDK 7u6 之后 `s.substring(a,b)` 会**拷贝**成新数组（在那之前是共享，也曾是著名的内存泄漏源）；Go 的 `s[a:b]` **永远零拷贝**。所以 Java 里"随便切一刀"的安全感在 Go 里不存在——**切出来要长期持有，就 `strings.Clone`**。
+
+**② 循环里的 `+=`：javac 帮你改，Go 不帮。** Java 9+ 用 `invokedynamic` + `StringConcatFactory` 把每次 `+` 变成一个高效的拼接过程，循环里虽然仍是 O(n²)，但每次的常数很小；Go 的 `s += x` 每次调 `runtime.concatstring2`——**分配 + 全量拷贝**，1000 段就是 61MB 垃圾。**在 Go 里看到循环内的 `+=`，直接 CR 打回。**
+
+**③ 没有 `String.intern()`。** Java 的常量池 + `intern` 让"相同字面量共享一份对象"。Go 的字符串字面量在 **rodata** 里，天然只有一份，但**运行期拼出来的字符串不会自动去重**——要省内存得自己建 `map[string]string` 做 interning（或依赖去重库）。
+
+**④ 没有"字符集"概念。** `new String(bytes, StandardCharsets.UTF_8)` 会**解码**（可能抛 `MalformedInputException`）；`string(b)` 只是**换个类型看同一份字节**，不做任何校验。所以 Go 里"非法 UTF-8 的 string"是合法存在的（13.1 的 bug 就是这么来的）。
+
+---
+
+## 13.5 框架与工程落地
+
+**① 流式解析 LLM 的 SSE：别用 `Scanner` 的默认 64KB 上限去接大事件。** `bufio.Scanner` 的单行上限默认 64KB，一次超长 tool-call JSON 就会 `ErrTooLong`（详见第 40 章）。缓冲区大小也是 size class 问题（详见第 15 章）：**4096 / 8192 是好的选择**。
+
+**② 拼 prompt：`Builder` + `Grow` + 流式写。** 13.3.5 的三条纪律就是生产规范：**能算总长就 `Grow`，能流式就别拼，子串一定 `Clone`。**
+
+**③ 日志与指标标签：别在热路径上 `fmt.Sprintf`。**
+
+```go
+// ❌ 每次一次格式化 + 若干次分配
+log.Info(fmt.Sprintf("llm call tenant=%s model=%s ms=%d", t, m, ms))
+
+// ✅ slog 结构化字段：键值对不分配中间字符串
+slog.Info("llm call", "tenant", t, "model", m, "ms", ms)
+```
+
+**④ 一条可以写进规范的判断链**：这段代码在**每请求**路径上吗？→ 有 `+=` 拼字符串吗？→ 有 `[]byte(s)` / `string(b)` 的往返吗？→ 有从大 string 切出来的长期引用吗？**四个问题过一遍，90% 的字符串相关内存问题就没了。**
+
+---
+
+## 13.6 踩坑清单（CR 可直接抄）
 
 | # | 现象 | 原因 | 正确写法 | 详见 |
 | --- | --- | --- | --- | --- |
@@ -386,7 +425,7 @@ func lastUserTurn(bigDoc string) string {
 
 ---
 
-## 13.5 一页速记
+## 13.7 一页速记
 
 | 关键词 | 一句话结论 |
 | --- | --- |
@@ -403,7 +442,7 @@ func lastUserTurn(bigDoc string) string {
 | 转换 | `string(b)` / `[]byte(s)` 默认复制；`m[string(b)]` 是编译器特例（不复制） |
 | 大 prompt | `Builder.Grow` 一次到位；能流式就别拼；子串一定 `Clone` |
 
-## 13.6 自检题
+## 13.8 自检题
 
 1. **`len(s)` 和 `utf8.RuneCountInString(s)` 在什么情况下不相等？为什么不能用 `len([]rune(s))` 代替后者？**
    > 答案要点：`len` 是字节数，`utf8.RuneCountInString` 是码点数；只要含非 ASCII（中文 3B、emoji 4B）就不相等，且含非法 UTF-8 时后者按"每字节一个 `RuneError`"计。`len([]rune(s))` 结果通常相同，但会**额外分配**一个 `[]rune`（4×N 字节 + header），在热点路径上是白烧内存；`utf8.RuneCountInString` 只用寄存器遍历，零分配。
@@ -414,7 +453,7 @@ func lastUserTurn(bigDoc string) string {
 3. **一个 HTTP handler 里：`body, _ := io.ReadAll(r.Body)`，然后 `parts := strings.Split(string(body), ",")`，把 `parts` 存进全局缓存。有什么问题？怎么改？**
    > 答案要点：`string(body)` 是**一次必要复制**（body 是 `[]byte`，且要长期持有），这步没问题；但 `strings.Split` 出来的每段都**零拷贝指向那同一块 `string` 的底层数组**——缓存里存了 1000 个 key，就等于把整份 body 永久留在堆上，pprof 上表现为"小字符串占大内存"。改法：对要长期存的段做 `strings.Clone`（或 `unsafe` 读完后立刻转成独立的小 string），并给缓存设容量上限。
 
-## 13.7 延伸阅读
+## 13.9 延伸阅读
 
 - 源码：`$GOROOT/src/runtime/string.go`（`stringStruct` / `slicebytetostring` / `concatstring2..5` / `rawstringtmp`）、`strings/builder.go`（`copyCheck`）、`strings/strings.go`（`Clone`）、`unicode/utf8/utf8.go`（`RuneStart` / `DecodeRuneInString` / `RuneCount`）
 - `unsafe` 包文档里 `String` / `StringData` / `SliceData` 三条的完整约束说明（**必读，短且精确**）

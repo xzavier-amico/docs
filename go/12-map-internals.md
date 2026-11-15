@@ -32,13 +32,13 @@ func buildPrefix(tools map[string]Tool) string {
 3. 为什么 `delete` 掉 100 万个键，内存不降？
 4. 为什么并发写 map 是 **fatal error**，连 `recover` 都救不回来？
 
-> 🎯 这一章的主线：**Java 的 `HashMap` 是「链表 + 红黑树」的教科书实现，Go 的 `map` 是「桶 + tophash + 渐进搬迁」的工程实现，1.24 之后又换成「Swiss Table 开放定址」。三次演化，每一次都在回答同一个问题：怎么让平均查找代价接近 1 次内存访问。**
+> 🎯 这一章的主线：**Java 的 `HashMap` 是「链表 + 红黑树」的教科书实现，Go 的 `map` 是「桶 + tophash + 渐进搬迁」，1.24 之后又换成「Swiss Table 开放定址」。三次演化都在回答同一个问题：怎么让平均查找代价接近 1 次内存访问。**
 
 ---
 
 ## 12.2 直觉模型：它不是一个「哈希表」，是「哈希表的三种形态」
 
-先给你一张能和 Java 对上号的脑图（以 Go 1.23 及之前的实现为主线，1.24 的差异在 12.3.6 单独讲）：
+先给你一张能和 Java 对上号的脑图（以 Go 1.23 及之前的实现为主线，1.24 的差异在 12.3.8 单独讲）：
 
 ```
 Java HashMap                       Go map（≤1.23）
@@ -191,7 +191,7 @@ func overLoadFactor(count int, B uint8) bool {
 }
 ```
 
-**为什么是 6.5 而不是 Java 的 0.75（即 6/8）？** 因为两者的"冲突代价"不同：Java 桶满了可以挂链表（代价是缓存不友好但可控），Go 桶满了就要分配溢出桶（一次 `mallocgc`，贵）。所以 Go 宁可让桶更满一点、少分配溢出桶，把平均查找次数往上顶——这是**用 CPU 换内存分配次数**，典型的 Go 取舍。
+**为什么是 6.5 而不是 Java 的 0.75（即 6/8）？** 因为冲突代价不同：Java 桶满了可以挂链表，Go 桶满了要分配溢出桶（一次 `mallocgc`，贵）。所以 Go 宁可让桶更满、少分配溢出桶，把平均查找次数往上顶——**用 CPU 换分配次数**。
 
 扩容有两个触发条件（`runtime/map.go` 的 `hashGrow` 调用点）：
 
@@ -488,19 +488,13 @@ Map{ used, seed, dirPtr, dirLen, globalDepth, globalShift, writing }
 
 **① "不保证顺序" ≠ "顺序会变"。** 12.1 已经演过一遍，实践含义只有一条：**凡是用 map 遍历结果产生输出、签名、缓存 key、幂等键的地方，一律先排序。**
 
-**② 没有 `equals`/`hashCode` 可重写。** Java 的 map key 靠 `hashCode()` 定位、`equals()` 判等，语义可以自定义（哪怕和 `==` 不一致）。Go 的 key **必须是可比较类型**（`comparable`：数字、string、指针、channel、interface、纯比较字段的 struct、数组；不能是 slice/map/func），比较由编译期生成的按字段比较完成，**不可定制**。所以"用 `Person` 的 `id` 做 hash"在 Go 里必须写成 `map[int64]*Person`——这其实是好事，逼你显式化身份（详见第 4 章）。
+**② 没有 `equals`/`hashCode` 可重写。** Java 的 key 靠 `hashCode()` 定位、`equals()` 判等，语义可自定义。Go 的 key **必须可比较**（数字、string、指针、channel、interface、纯比较字段的 struct、数组；不能是 slice/map/func），比较由编译期生成，**不可定制**。所以"用 `Person` 的 `id` 做 hash"必须写成 `map[int64]*Person`——这逼你显式化身份（详见第 4 章）。
 
 **③ 并发语义是"检测"不是"保护"。** `HashMap` 并发写会静默损坏（JDK 7 还会成环死循环），`ConcurrentHashMap` 给你并发安全。Go 的 `map` **两者都没有**：它选择**检测 + fatal**。`sync.Map` 是另一回事（只适合读多写少、key 集合稳定，详见第 22 章）。绝大多数场景的正确解是 **"加锁" 或 "分片加锁"**。
 
 **④ 内存从不归还。** `HashMap` 删空后表数组同样不缩容（只有手动 `trimToSize`），这点两者同构。但 Go 因为**没有分代 GC**（详见第 28 章），长期存活的大 map 更贵，更需要主动整体替换。
 
-| 你会问的问题 | Java | Go |
-| --- | --- | --- |
-| 为什么不像 JDK8 那样树化？ | 防 hash 碰撞攻击 | `hash0` 随机种子从源头防，不需要树 |
-| 为什么负载因子是 6.5 不是 0.75？ | 0.75 = 12/16 | 6.5/8 = 81%；Go 更怕"分配溢出桶" |
-| 扩容会不会卡住？ | 会，`resize()` 单次长尾 | 不会，渐进式；但内存瞬时 1.5 倍 |
-| 能不能 `get` 拿 null 判断存在？ | 不能（null 二义） | `v, ok := m[k]`，语言级支持 |
-| 删除会释放内存吗？ | 元素对象会，表数组不会 | 都不会（除非整体替换） |
+一句话收束：**Java 的 map 是"库"，Go 的 map 是"语言 + runtime 的一部分"**——所以你调不动它的负载因子、换不了它的哈希函数、也不会遇到"某个版本 HashMap 实现变了导致行为漂移"的问题，代价是它也永远不会为你的特定场景做特化。
 
 ---
 
@@ -525,11 +519,11 @@ func (r *Registry) MustRegister(name string, t Tool) {
 }
 ```
 
-这个模式在 langchaingo 的 `callbacks` 处理器注册、eino 的组件/工具节点查表、MCP SDK 的 server 端 `tools/list` + `tools/call` 分派里到处都是同一副骨架：**名字 → 实现** 的 map + **稳定顺序**的切片。
+这个模式在 langchaingo 的 `callbacks` 注册、eino 的节点查表、MCP SDK 的 `tools/list` / `tools/call` 分派里都是同一副骨架：**名字 → 实现** 的 map + **稳定顺序**的切片。
 
 **② Agent 场景里 map 的三类用法，坑各不相同**：静态注册表（启动期写完、运行期裸 map）、高频计数（token 账本 → 分片锁或 `atomic.Int64`，别用 `map[tenant]int64` 硬扛）、会话/在途请求（`sync.RWMutex` 包住 + 注意不缩容）。
 
-**③ MCP / JSON-RPC 里的经典需求**：请求 id → 等待中的响应 channel。这是"读一次、删一次"的短生命周期 map，必须配 `sync.Mutex` + 超时清理（`defer cleanup()`），否则客户端断连后会留下一堆 `chan` 直到进程结束。**别用裸 map 赌运气，也别用 `sync.Map`——它的语义是"读多写少"，而这里写和删一样频繁。**
+**③ MCP / JSON-RPC 里的经典需求**：请求 id → 等待中的响应 channel。这是"读一次、删一次"的短生命周期 map，必须配 `sync.Mutex` + `defer cleanup()` 超时清理，否则客户端断连后留下一堆 `chan`。别裸 map 赌运气，也别用 `sync.Map`（它针对读多写少，这里写删一样频繁）。
 
 ---
 
@@ -546,7 +540,6 @@ func (r *Registry) MustRegister(name string, t Tool) {
 | 7 | 用 slice / 含 slice 的 struct 当 key，编译不过 | key 必须 `comparable` | 改用可比较的身份（id / 序列化后的 string） | 12.4 |
 | 8 | `for k, v := range m { delete(m, k) }` 让人不放心 | 遍历中删除**是**安全的（Go 规范允许） | 但**不要**在遍历中新增键，行为未定义 | 12.3.5 |
 | 9 | 升级 1.24 后遍历顺序"看起来变了" | Swiss Table 换了随机方式与内存布局 | 本来就不该依赖；全局搜一遍遍历 map 的排序点 | 12.3.8 |
-| 10 | `map` 当 out 参数传进去，函数里重建后调用方没变 | map 值是指针语义，但**重新赋值 header 不可见** | 返回新 map，或传 `*map[K]V` | 第 9 章 |
 
 ---
 
@@ -569,14 +562,14 @@ func (r *Registry) MustRegister(name string, t Tool) {
 
 ## 12.8 自检题
 
-1. **`delete` 掉 100 万个键之后，`runtime.ReadMemStats` 显示 `HeapAlloc` 几乎没降，为什么？有什么解？**
-   > 答案要点：`mapdelete` 只把槽标成 `emptyOne`、清空 key/elem（好让 GC 回收 key/value 里的指针）、`h.count--`；**桶数组与 `hmap` 从不缩容**，唯一"整理"是只在写操作触发的 `sameSizeGrow`（尺寸不变）。解法：整体替换 `m = make(map[K]V, hint)` 把旧的交给 GC；或换成带容量上限的 LRU。
+1. **`delete` 掉 100 万个键之后，`HeapAlloc` 几乎没降，为什么？有什么解？**
+   > `mapdelete` 只把槽标成 `emptyOne`、清空 key/elem（好让 GC 回收里面的指针）、`h.count--`；**桶数组与 `hmap` 从不缩容**，唯一的"整理"是只在写操作触发的 `sameSizeGrow`（尺寸不变）。解法：整体替换 `m = make(map[K]V, hint)` 把旧的交给 GC，或换带容量上限的 LRU。
 
-2. **为什么 Go 1.24 换成 Swiss Table 后，真实服务里"只有 2~3%"，而微基准里小 map 能快 30%+？**
-   > 答案要点：① 真实服务里 map 只占总 CPU 一小块（网络、JSON、GC、锁都要钱）；② 大 map 的收益来自缓存局部性，被已有 cache miss 稀释；③ 小 map 的收益是结构性的（少两次分配 + 去掉溢出指针间接寻址），所以微基准显眼。结论：别指望升级白拿 30%，`benchstat` 自己的热点。
+2. **为什么 1.24 换成 Swiss Table 后，真实服务里"只有 2~3%"，而微基准里小 map 能快 30%+？**
+   > ① 真实服务里 map 只占总 CPU 一小块（网络、JSON、GC、锁都要钱）；② 大 map 的收益来自缓存局部性，被已有 cache miss 稀释；③ 小 map 的收益是结构性的（少两次分配 + 去掉溢出指针间接寻址）。结论：别指望升级白拿 30%，`benchstat` 自己的热点。
 
-3. **一个 goroutine 在写 `map`，另一个在同时 `range` 它，会发生什么？如果同一个 goroutine 边 `range` 边 `delete` 呢？**
-   > 答案要点：前者是数据竞争，runtime 有机会检测到并 `fatal("concurrent map read and map write")`（抓不到则表现为不可预期的崩溃/脏数据）——**不是 panic，`recover` 无效**。后者是规范允许的（遍历中删除是安全的）。但**遍历中新增键**行为未定义，别依赖。
+3. **一个 goroutine 在写 `map`，另一个同时在 `range` 它，会发生什么？同一个 goroutine 边 `range` 边 `delete` 呢？**
+   > 前者是数据竞争，runtime 有机会检测到并 `fatal("concurrent map read and map write")`（抓不到就是不可预期的崩溃/脏数据）——**不是 panic，`recover` 无效**。后者规范允许（遍历中删除安全）。但**遍历中新增键**行为未定义，别依赖。
 
 ## 12.9 延伸阅读
 
