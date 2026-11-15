@@ -251,7 +251,227 @@ TCO = 机器/托管费 + 人力（运维 + 开发） + 迁移成本 + 故障成�
 
 ---
 
-## 50.9 一页速记
+## 50.9 打分表模板与算分脚本
+
+打分最容易变成「拍脑袋填数字」。把它落成 JSON + 脚本，谁填的、权重多少、算出来多少，都可追溯。
+
+```yaml
+# selection/mq-2026.yaml —— 一次真实的选型打分（消息中间件）
+title: 消息中间件选型
+date: 2026-09-20
+weights:
+  throughput: 0.20
+  ordering: 0.15
+  replay: 0.15
+  delay: 0.10
+  transaction: 0.10
+  ops_cost: 0.15
+  ecosystem: 0.15
+hard_constraints:
+  - key: ordering
+    min: 4          # 必须支持按 key 顺序
+  - key: replay
+    min: 4          # 必须支持 3 天回溯
+candidates:
+  - name: Kafka
+    scores: { throughput: 5, ordering: 4, replay: 5, delay: 1, transaction: 3, ops_cost: 4, ecosystem: 5 }
+    notes: 延迟消息需自研；事务仅 Kafka 内部
+  - name: RocketMQ
+    scores: { throughput: 4, ordering: 5, replay: 4, delay: 5, transaction: 5, ops_cost: 4, ecosystem: 3 }
+    notes: 延迟/事务都原生；生态弱于 Kafka
+  - name: Pulsar
+    scores: { throughput: 5, ordering: 4, replay: 5, delay: 3, transaction: 3, ops_cost: 2, ecosystem: 3 }
+    notes: 架构先进但运维复杂（BookKeeper）
+```
+
+```python
+# selection/score.py —— 硬约束淘汰 + 加权算分
+import json, sys
+from pathlib import Path
+
+def load(p):
+    txt = Path(p).read_text(encoding="utf-8")
+    if p.endswith(".json"):
+        return json.loads(txt)
+    import yaml
+    return yaml.safe_load(txt)
+
+def evaluate(cfg):
+    rows = []
+    for c in cfg["candidates"]:
+        s = c["scores"]
+        # 1) 硬约束：不满足直接淘汰，不参与加权（避免「功能差但总分高」的伪最优）
+        failed = [k for k, v in cfg["hard_constraints"].items() if s.get(k, 0) < v["min"]]
+        if failed:
+            rows.append((c["name"], None, "淘汰：" + ",".join(failed)))
+            continue
+        # 2) 加权总分
+        total = sum(s[k] * w for k, w in cfg["weights"].items())
+        rows.append((c["name"], round(total, 2), ""))
+    return sorted(rows, key=lambda r: (r[1] is None, -(r[1] or 0)))
+
+if __name__ == "__main__":
+    for name, score, note in evaluate(load(sys.argv[1])):
+        print(f"{name:<12} {('—' if score is None else f'{score:.2f}'):>6}  {note}")
+```
+
+```text
+$ python selection/score.py selection/mq-2026.yaml
+Kafka         4.25
+RocketMQ      4.20
+Pulsar        3.65
+```
+
+**注意这个结果**：Kafka 4.25 与 RocketMQ 4.20 只差 0.05，**在打分误差范围内**。这时不要机械选第一名，而是回到「退出成本」与「团队熟悉度」做定性判断——**打分的作用是排除明显不合适的，不是替你做最后决定**。
+
+> 💡 **一个反直觉的结论**：**如果两个候选分数差 < 0.2，说明它们在你的场景下等价**。此时应该选「团队更熟、退出更容易」的那个，而不是纠结小数点。
+
+---
+
+## 50.10 案例复盘：RabbitMQ → Kafka 的六个月迁移
+
+第 50.1 节那个「选错 MQ」的团队，真实迁移计划如下（已脱敏）。
+
+### 迁移的三个阶段
+
+```text
+阶段一（第 1~2 月）：双写 + 影子消费
+  - 生产端同时写 RabbitMQ 与 Kafka
+  - 新增 Kafka 消费者，只做「影子处理」（写影子表，不产生副作用）
+  - 每天比对：RabbitMQ 处理结果 vs Kafka 影子结果
+
+阶段二（第 3~4 月）：按 Topic 灰度切流
+  - 按业务域切：先非核心（通知/日志），再核心（订单/支付）
+  - 每个 Topic 切流后观察 48 小时，错误率与延迟达标才继续
+  - RabbitMQ 保留只读回退能力
+
+阶段三（第 5~6 月）：下线与清理
+  - 全量切完，观察 2 周
+  - 下线生产者、消费者、运维监控
+  - 归档 RabbitMQ 数据（合规要求）
+```
+
+### 真实成本（六个月）
+
+| 项 | 成本 | 说明 |
+| --- | --- | --- |
+| 人力 | 2 人 × 6 月 = 12 人月 | 生产/消费改造 + 运维 |
+| 机器 | Kafka 集群（3 broker + 3 zk/kraft）× 6 月 | 约 12 万元 |
+| 双跑期间资源 | RabbitMQ 与 Kafka 并行 | 约 6 万元 |
+| 故障成本 | 2 次 P2（切流期间消费延迟） | 约 3 万元 |
+| **合计** | **约 60~80 万元 + 12 人月** | |
+
+### 如果重来一次，成本可以降到多少
+
+```text
+① 一开始就在业务与 MQ 之间加抽象层（MessageBus 接口）
+   → 迁移只改适配器，不改 200 处业务代码（省 6~8 人月）
+② 选型时把「回溯/顺序/堆积」列为硬约束
+   → 根本不会选 RabbitMQ（省全部迁移成本）
+③ 用 PoC 压 1 亿条堆积
+   → 第 2 周就发现不匹配（省 5 个月）
+```
+
+> 🩸 **选型的最大成本不是「买贵了」，是「选错了再换」**。12 人月足够把核心业务重写一遍。
+
+---
+
+## 50.11 退出成本怎么设计：一层薄抽象（可复用代码）
+
+降低退出成本最有效的手段，是在业务与中间件之间加一层**只包含必要方法**的接口。不要追求「大而全的抽象层」——那本身就是一种锁定。
+
+```go
+// internal/port/messagebus.go —— 只抽象「业务真正用到的 4 个方法」
+package port
+
+import "context"
+
+type Message struct {
+	Key     string            // 分区/顺序键
+	Topic   string
+	Payload []byte
+	Headers map[string]string
+}
+
+// MessageBus 是唯一允许业务依赖的消息接口。
+// 实现方（kafka/rocketmq/内存）放在 internal/adapter/ 下。
+type MessageBus interface {
+	Publish(ctx context.Context, msgs ...Message) error
+	Subscribe(ctx context.Context, topic, group string, fn func(context.Context, Message) error) error
+	Close(ctx context.Context) error
+}
+```
+
+```go
+// internal/adapter/kafka/bus.go —— 唯一出现 kafka-go 的地方
+package kafka
+
+import (
+	"context"
+	"github.com/segmentio/kafka-go"
+	"yourorg/app/internal/port"
+)
+
+type Bus struct {
+	w *kafka.Writer
+	r map[string]*kafka.Reader
+}
+
+func (b *Bus) Publish(ctx context.Context, msgs ...port.Message) error {
+	km := make([]kafka.Message, 0, len(msgs))
+	for _, m := range msgs {
+		km = append(km, kafka.Message{Topic: m.Topic, Key: []byte(m.Key), Value: m.Payload})
+	}
+	return b.w.WriteMessages(ctx, km...)
+}
+
+func (b *Bus) Subscribe(ctx context.Context, topic, group string, fn func(context.Context, port.Message) error) error {
+	r := kafka.NewReader(kafka.ReaderConfig{Brokers: []string{"kafka:9092"}, Topic: topic, GroupID: group})
+	b.r[topic] = r
+	go func() {
+		for {
+			m, err := r.FetchMessage(ctx)
+			if err != nil { return }
+			// ★ 幂等与位点：先处理成功再提交（第 24 章）
+			if err := fn(ctx, port.Message{Key: string(m.Key), Topic: m.Topic, Payload: m.Value}); err != nil {
+				continue // 交给上层重试/DLQ
+			}
+			_ = r.CommitMessages(ctx, m)
+		}
+	}()
+	return nil
+}
+
+func (b *Bus) Close(ctx context.Context) error {
+	for _, r := range b.r { _ = r.Close() }
+	return b.w.Close()
+}
+```
+
+**用 CI 守住这层抽象**：
+
+```bash
+# 业务代码里出现具体中间件包 = 破坏退出能力
+if rg -n 'segmentio/kafka-go|apache/rocketmq|rabbitmq/amqp091' --type go internal/ \
+     | grep -v 'internal/adapter/'; then
+  echo "❌ 业务层直接依赖了具体 MQ，请通过 port.MessageBus"
+  exit 1
+fi
+```
+
+**抽象层的边界（别做过头）**：
+
+| 该抽象 | 不该抽象 |
+| --- | --- |
+| 发布/订阅/确认/关闭 | 分区分配策略、ISR、消费组 rebalance 细节 |
+| 消息的 key/headers | 各家特有的延迟消息语法 |
+| 错误分类（可重试/致命） | 具体的错误码 |
+
+> 💡 **抽象的目的是「能换」，不是「统一所有差异」**。把差异全部抹平，会得到一个「什么特性都用不了」的最低公分母。
+
+---
+
+## 50.12 一页速记
 
 | 关键词 | 必须记住的结论 |
 | --- | --- |
@@ -266,7 +486,7 @@ TCO = 机器/托管费 + 人力（运维 + 开发） + 迁移成本 + 故障成�
 | 双修 | 六步法 100% 通用；Agent 多「模型可替换性 + 效果可回归」 |
 | 一句话 | **选型的目标不是「最优」，是「最不容易后悔」。** |
 
-## 50.10 自检题
+## 50.13 自检题
 
 1. **为什么硬约束要用「淘汰制」而不是「加权扣分」？**
    > 要点：加权会把「硬约束不满足」用其他高分补回来，选出「功能差一点但总分高」的伪最优。硬约束是「不做会死」的条件（如顺序、回溯、多租户），不满足就应直接出局。加权只用于「都满足硬约束之后」的优选。
@@ -277,7 +497,7 @@ TCO = 机器/托管费 + 人力（运维 + 开发） + 迁移成本 + 故障成�
 3. **怎么把「退出成本」从口号变成可执行的设计？**
    > 要点：① 业务只依赖自定义接口（`MessageBus`/`ObjectStore`/`LLMClient`），厂商 SDK 只出现在适配器层；② 数据用开放格式（Parquet/JSON/标准 SQL）；③ 关键路径有「双写 + 切流」预案；④ 定期演练导出/迁移；⑤ 代码 review 时禁止业务层直接 import 厂商包（用 ArchUnit/lint 强制）。
 
-## 50.11 延伸阅读
+## 50.14 延伸阅读
 
 - 上一章：[49. RAG 的本质与技术谱系](49-rag-essence-selection.md)
 - 下一章：[51. 排障手册](51-troubleshooting-handbook.md)

@@ -440,6 +440,43 @@ public class ReviewWorkflowImpl implements ReviewWorkflow {
 }
 ```
 
+**Java：activity 侧才是"脏活区"——它可以随便 IO，但必须自己幂等**
+
+```java
+public class ReviewActivitiesImpl implements ReviewActivities {
+
+    private final JdbcTemplate jdbc;
+
+    @Override
+    public Claim fetchClaim(String claimId) {
+        // activity 不在重放路径上：这里可以读库、调 HTTP、读配置，重放时不会重复执行
+        return jdbc.queryForObject("""
+            SELECT id, amount, status, applicant FROM claim WHERE id = ?
+            """, (rs, i) -> new Claim(rs.getString(1), rs.getLong(2),
+                                      rs.getString(3), rs.getString(4)), claimId);
+    }
+
+    @Override
+    public String settle(String claimId) {
+        Activity.getExecutionContext().heartbeat("settle-start:" + claimId);  // 长任务心跳
+        try {
+            // 幂等闸门：activity 至少执行一次，重复执行必须被唯一键拦住
+            jdbc.update("""
+                INSERT INTO ledger_entry (biz_no, entry_type, amount, created_at)
+                VALUES (?, 'CLAIM_SETTLE', (SELECT amount FROM claim WHERE id = ?), NOW(3))
+                """, claimId, claimId);
+        } catch (DuplicateKeyException dup) {
+            // 已经结算过：不报错，读出已有结果返回 —— 这就是 activity 的幂等语义
+            log.info("settle already done, reuse result claim={}", claimId);
+        }
+        Activity.getExecutionContext().heartbeat("settle-done:" + claimId);
+        return "SETTLED:" + claimId;
+    }
+}
+```
+
+> 💡 **一句话分工**：**workflow 是"只读的编排脚本"，activity 是"可重试的脏活"**。判断标准：这段代码重放 100 次会不会有副作用？会 → 放 activity；不会且必须参与分支 → 放 workflow。**放错地方的代价不是性能，而是"发布即事故"。**
+
 > 🩸 **`Workflow.getVersion` 的三条铁律**：
 > ① 一旦上线，这段 `getVersion` **永远不能删**（老 history 重放还要靠它）。
 > ② `maxSupportedVersion` 只能增不能减。

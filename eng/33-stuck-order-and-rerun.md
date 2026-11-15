@@ -509,6 +509,79 @@ public class RerunService {
 2. **挂补偿任务**：如果被跳过的步骤有副作用，必须创建一条"待补"记录，进入独立的补偿队列，**并且有 SLA**。没有补偿任务的跳过只是撒谎。
 3. **打标记**：在业务实体上留一个 `skipped_steps` 字段（JSON 数组），让下游和报表知道"这笔的数据是不完整的"。**不要指望别人记得去审计表里查。**
 
+**Java：把"三件套"做成代码约束，而不是靠人记得**
+
+```java
+@Service
+public class SkipService {
+
+    /** 绝对不能跳的步骤：命中即拒绝。这个集合是"合规边界"，不是配置项。 */
+    private static final Set<String> NEVER_SKIPPABLE = Set.of(
+        "FUND_DEBIT", "FUND_REFUND", "FUND_TRANSFER",   // 资金
+        "RISK_CHECK", "COMPLIANCE_REVIEW",              // 合规
+        "RECON_CONFIRM"                                 // 对账差异确认
+    );
+
+    private final JdbcTemplate jdbc;
+    private final TransactionTemplate tx;
+    private final ApprovalClient approval;
+    private final CompensationService compensation;
+
+    /**
+     * 跳过某一步。四条硬约束：① 不可跳步骤直接拒 ② 必须有已批准的审批单
+     * ③ 必须有补偿任务 ④ 审计与业务改动同事务。
+     */
+    public SkipResult skip(long id, String step, String operator,
+                           String reasonCode, String reasonText, String approvalId) {
+
+        if (NEVER_SKIPPABLE.contains(step)) {
+            throw new IllegalStateException("step " + step + " is never skippable");
+        }
+        if (reasonText == null || reasonText.length() < 10
+                || List.of("修复数据", "手动处理", "临时修复").contains(reasonText.trim())) {
+            throw new IllegalArgumentException("reason_text must be meaningful");
+        }
+        if (!approval.isApproved(approvalId, "SKIP", "refund", id)) {
+            throw new IllegalStateException("approval not valid for this aggregate");
+        }
+
+        return tx.execute(status -> {
+            Map<String, Object> before = jdbc.queryForMap(
+                "SELECT id, status, version, skipped_steps FROM refund_order WHERE id = ?", id);
+
+            // ① 补偿任务必须先建：没有它，跳过就是"把欠账藏起来"
+            String compTaskId = compensation.create(id, step,
+                    "SKIP_COMPENSATION", operator, approvalId);
+
+            // ② 业务标记：让下游知道这份数据不完整
+            jdbc.update("""
+                UPDATE refund_order
+                   SET skipped_steps = JSON_ARRAY_APPEND(
+                         COALESCE(skipped_steps, JSON_ARRAY()), '$', ?),
+                       version = version + 1, updated_at = NOW(3)
+                 WHERE id = ? AND version = ?
+                """, step, id, before.get("version"));
+
+            // ③ 审计：与上面两步同一事务，任何一步失败全部回滚
+            jdbc.update("""
+                INSERT INTO intervention_audit
+                  (intervention_no, aggregate_type, aggregate_id, action, approval_id,
+                   operator, operator_ip, reason_code, reason_text, before_state,
+                   after_state, before_snapshot, script_version, idem_key, dry_run, trace_id)
+                VALUES (?, 'refund', ?, 'SKIP', ?, ?, ?, ?, ?, ?, ?, CAST(? AS JSON),
+                        'skip-service@1', ?, 0, ?)
+                """, nextNo(), id, approvalId, operator, ip(), reasonCode, reasonText,
+                before.get("status"), before.get("status"), toJson(before),
+                "skip:" + id + ":" + step, traceId());
+
+            return new SkipResult(id, step, compTaskId, "SKIPPED_WITH_COMPENSATION");
+        });
+    }
+}
+```
+
+> 🩸 **这段代码的价值不在实现，而在于它把三条"制度"变成了三个"异常"**：不可跳的步骤会抛异常、没审批会抛异常、理由太敷衍会抛异常。**制度靠人执行会衰减，靠代码执行不会。**
+
 ### 33.4.6 人工干预审计表
 
 ```sql

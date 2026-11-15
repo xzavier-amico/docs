@@ -135,6 +135,50 @@ SLO-ORDER-API-01
   击穿动作 : 冻结非修复类发布 + 值班升级到 P1
 ```
 
+**口径必须写在代码里，不能只写在文档里**。否则下一个人加一个 `catch`、或者把 429 当失败，你的 SLI 就悄悄变了，而看板上看不出来：
+
+```java
+// Java：SLI 口径的唯一实现。禁止各接口自己算「成功/失败」，否则口径必然分叉
+@Component
+public class SloRecorder {
+
+    private final Counter good;
+    private final Counter valid;
+    private final Timer   latency;
+
+    public SloRecorder(MeterRegistry reg) {
+        this.good = Counter.builder("slo_events_total").tag("kind", "good").register(reg);
+        this.valid = Counter.builder("slo_events_total").tag("kind", "valid").register(reg);
+        this.latency = Timer.builder("slo_request_duration_seconds")
+                .publishPercentileHistogram()
+                .sla(Duration.ofMillis(100), Duration.ofMillis(200), Duration.ofMillis(500),
+                     Duration.ofSeconds(1), Duration.ofSeconds(3))
+                .register(reg);
+    }
+
+    public void record(String route, int status, long latencyMs) {
+        if (isExcluded(route, status)) {
+            return;                       // 既不计分子也不计分母，口径才干净
+        }
+        valid.increment();
+        if (status < 400) {
+            good.increment();
+        }
+        latency.record(Duration.ofMillis(latencyMs));   // 延迟 SLI 用直方图单独算 P99
+    }
+
+    // 排除项集中在一处，改这里必须走 SLO 口径评审（对应 slo_registry.exclude_note）
+    private boolean isExcluded(String route, int status) {
+        return route.startsWith("/health")
+            || route.startsWith("/internal/")
+            || route.startsWith("/actuator/")
+            || (status >= 400 && status < 500);   // 4xx：客户端错误 + 429（限流是我们主动的）
+    }
+}
+```
+
+> ⚠️ 反例：在网关层用 `status != 200` 判失败。这样 201/204 会被算成失败，429 也会——你的 SLO 会在每次限流时「违约」，然后团队学会无视这个指标。**口径错误比没有 SLO 更糟，因为它给了你一个假的安全感。**
+
 ### 第二步：从 SLO 反推告警阈值（多窗口 + 多燃尽率）
 
 为什么不能「错误率 > 5% 就报警」：SLO 是 99.9%，允许错误率只有 **0.1%**；5% 阈值意味着**你已经烧掉 50 倍预算才被告知**。反过来把阈值设成 0.11%，正常波动就会让你一晚上醒 20 次。正确解法是**同时看「烧得多快」和「烧了多久」**——这就是 Google SRE Workbook 的多窗口多燃尽率：
@@ -292,15 +336,98 @@ func (g *Gate) Check(ctx context.Context, slo string, isFixOnly bool) (gateResul
 	return gateResult{true, fmt.Sprintf("预算剩余 %.1f%%，正常发布", remaining*100)}, nil
 }
 
+// Policy 把「剩余预算」映射成发布策略。这个映射必须只有一份实现（CI 与看板共用）
+func Policy(remaining float64) string {
+	switch {
+	case remaining <= 0:
+		return "FREEZE"
+	case remaining < 0.10:
+		return "FIX_ONLY"
+	case remaining < 0.25:
+		return "REVIEW"
+	default:
+		return "NORMAL"
+	}
+}
+
 // 每天 09:00 由调度任务跑一次，把结果写进 release_freeze 表，让所有人看得见
-func (g *Gate) DailySnapshot(ctx context.Context, slos []string) error {
-	_ = time.Now()
+func (g *Gate) DailySnapshot(ctx context.Context, slos []string, store SnapshotStore) error {
 	for _, s := range slos {
-		if r, err := g.Check(ctx, s, false); err == nil {
-			_ = r // 落库：INSERT INTO release_freeze(...)
+		r, err := g.Check(ctx, s, false)
+		if err != nil {
+			return err
+		}
+		remaining := r.Remaining // Check 内部解析出的 0~1 数值
+		if err := store.Upsert(ctx, s, remaining, Policy(remaining)); err != nil {
+			return err // 落库失败必须让任务失败：没有快照 = 没有刹车
 		}
 	}
 	return nil
+}
+```
+
+```java
+// Java：策略判定的「唯一实现」。CI 的 Jenkins step 与内部发布平台都调它，禁止各写一份阈值
+@Service
+public class ReleasePolicyService {
+
+    public enum Policy { NORMAL, REVIEW, FIX_ONLY, FREEZE }
+
+    private static final double REVIEW_LINE   = 0.25;
+    private static final double FIX_ONLY_LINE = 0.10;
+
+    private final JdbcTemplate jdbc;
+
+    public ReleasePolicyService(JdbcTemplate jdbc) {
+        this.jdbc = jdbc;
+    }
+
+    public Policy decide(double remaining) {
+        if (remaining <= 0)          return Policy.FREEZE;
+        if (remaining < FIX_ONLY_LINE) return Policy.FIX_ONLY;
+        if (remaining < REVIEW_LINE)   return Policy.REVIEW;
+        return Policy.NORMAL;
+    }
+
+    // Jenkins / 发布平台调这个接口：不放行就返回 409 + 原因，前端直接把原因展示给研发
+    public void assertReleasable(String sloKey, boolean fixOnly) {
+        Double remaining = jdbc.queryForObject(
+                "SELECT budget_remain FROM release_freeze " +
+                "WHERE slo_key = ? AND snap_date = CURDATE()", Double.class, sloKey);
+        if (remaining == null) {
+            throw new IllegalStateException("no budget snapshot today: gate fail-closed");
+        }
+        Policy p = decide(remaining);
+        boolean allowed = switch (p) {
+            case NORMAL -> true;
+            case REVIEW -> fixOnly;                  // 修复类可发，大功能要双签
+            case FIX_ONLY -> fixOnly;
+            case FREEZE -> false;
+        };
+        if (!allowed) {
+            throw new ReleaseBlockedException(
+                "release blocked: slo=" + sloKey + " remaining=" + remaining + " policy=" + p);
+        }
+    }
+
+    @Scheduled(cron = "0 5 9 * * ?")   // 09:05，避开 09:00 的发布高峰
+    public void snapshotDaily() {
+        jdbc.queryForList("SELECT slo_key FROM slo_registry WHERE status = 1", String.class)
+            .forEach(k -> {
+                Double r = queryRemainingFromPrometheus(k);   // §21.4 第二步的 budget_remaining
+                if (r == null) return;                        // 查不到就不写：宁可缺快照也不写假数
+                jdbc.update("""
+                    INSERT INTO release_freeze(slo_key, snap_date, budget_remain, policy, decided_by)
+                    VALUES (?, CURDATE(), ?, ?, 'auto')
+                    ON DUPLICATE KEY UPDATE budget_remain = VALUES(budget_remain),
+                                            policy = VALUES(policy)
+                    """, k, r, decide(r).name());
+            });
+    }
+
+    private Double queryRemainingFromPrometheus(String sloKey) {
+        return null; // 实现略：HTTP 调 /api/v1/query?query=slo:<key>:budget_remaining
+    }
 }
 ```
 

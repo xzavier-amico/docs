@@ -327,7 +327,243 @@ oasdiff breaking --base api-v1.yaml --revision api-v2.yaml
 
 ---
 
-## 47.10 一页速记
+## 47.10 契约演进矩阵：哪些改动是安全的
+
+契约一旦发布，就不能随便改。下面这张表是「能不能改」的判据，建议直接放进 PR 模板。
+
+| 改动 | 对旧调用方 | 兼容性 | 处理方式 |
+| --- | --- | --- | --- |
+| **新增可选字段** | 无影响（忽略未知字段） | ✅ 兼容 | 直接发 |
+| **新增必填字段** | 旧调用方不传 → 校验失败 | ❌ 破坏 | 两阶段：先可选+默认值，全量后再必填 |
+| **删除字段** | 旧调用方读不到 | ❌ 破坏 | 两阶段：先标 `deprecated`，观测 30 天无调用再删 |
+| **改字段类型**（int→string） | 解析失败 | ❌ 破坏 | 新增字段 `xxxStr`，双写，迁移后再删旧 |
+| **改字段语义**（分→元） | 数值差 100 倍，**静默错误** | ❌ 最危险 | 永不复用字段名；新增 `amountCents` 替代 `amount` |
+| **改枚举取值** | 旧调用方走 default | ⚠️ 取决于实现 | 只加不删；新增值必须能被旧客户端安全忽略 |
+| **收紧校验**（pattern/长度） | 旧调用方可能被拒 | ❌ 破坏 | 先告警观察，再收紧 |
+| **放宽校验** | 无影响 | ✅ 兼容 | 直接发 |
+| **改 URL 路径** | 404 | ❌ 破坏 | 新旧并存 + 重定向 |
+
+**三条铁律**：
+
+```text
+① 只加不改（字段、枚举、可选性）
+② 语义永不复用：amount 从「元」改成「分」是灾难，宁可新增字段
+③ 删除要两阶段：deprecated 标记 → 观测无调用 → 再删
+```
+
+**自动化检查**（CI 里跑，不通过不许合并）：
+
+```bash
+# OpenAPI 破坏性变更检测
+oasdiff breaking --base api/v1/openapi.yaml --revision api/v2/openapi.yaml
+# 退出码非 0 = 有破坏性变更
+```
+
+```bash
+# Protobuf 兼容性检查
+buf breaking --against '.git#branch=main'
+```
+
+---
+
+## 47.11 消费者驱动契约：Pact 完整落地
+
+「契约测试」有两种做法：
+
+| 做法 | 谁定义契约 | 优点 | 缺点 |
+| --- | --- | --- | --- |
+| **提供方定义**（OpenAPI/Schema） | 服务提供方 | 简单、可生成文档 | 可能写出「提供方想给」而非「消费方需要」 |
+| **消费者驱动**（Pact） | 消费方 | 契约反映真实需求 | 需要 CI 集成与 broker |
+
+**Pact 的三步流程**：
+
+```text
+① 消费方写测试 → 生成 pact 文件（描述「我期望什么」）
+② pact 文件上传到 Broker
+③ 提供方 CI 拉取 pact → 验证自己的实现是否满足
+```
+
+### 消费方（Java，Spring Boot + Pact）
+
+```java
+@ExtendWith(PactConsumerTestExt.class)
+@PactTestFor(providerName = "refund-service", port = "8081")
+class RefundClientPactTest {
+
+    @Pact(consumer = "customer-service")
+    public RequestResponsePact getRefund(PactDslWithProvider builder) {
+        return builder
+            .given("退款单 8821300001 存在且已成功")
+            .uponReceiving("查询退款单")
+            .path("/api/refunds/8821300001")
+            .method("GET")
+            .willRespondWith()
+            .status(200)
+            .headers(Map.of("Content-Type", "application/json"))
+            .body(new PactDslJsonBody()
+                .numberType("refundId", 8821300001L)
+                .stringValue("status", "SUCCESS")
+                .numberType("amountCents", 238000)
+                .stringValue("currency", "CNY"))
+            .toPact();
+    }
+
+    @Test
+    @PactTestFor(pactMethod = "getRefund")
+    void 查询退款单_字段与类型符合预期(MockServer mockServer) {
+        RefundClient client = new RefundClient(mockServer.getUrl());
+        Refund r = client.get(8821300001L);
+        assertThat(r.getAmountCents()).isEqualTo(238000L);   // ★ 单位是分
+        assertThat(r.getCurrency()).isEqualTo("CNY");
+        assertThat(r.getStatus()).isEqualTo(Status.SUCCESS); // ★ 大写枚举
+    }
+}
+```
+
+### 提供方验证（Go）
+
+```go
+// provider/pact_test.go —— 用 pact-go 验证提供方实现
+package provider
+
+import (
+	"testing"
+	"github.com/pact-foundation/pact-go/v2/provider"
+)
+
+func TestRefundProvider(t *testing.T) {
+	verifier := provider.NewVerifier()
+	err := verifier.VerifyProvider(t, provider.VerifyRequest{
+		ProviderBaseURL: "http://localhost:8081",
+		PactURLs:        []string{"./pacts/customer-service-refund-service.json"},
+		StateHandlers: provider.StateHandlers{
+			"退款单 8821300001 存在且已成功": func(setup bool, s provider.ProviderStateV2) error {
+				if setup {
+					return seedRefund(8821300001, 238000, "SUCCESS")
+				}
+				return cleanupRefund(8821300001)
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+```
+
+**Pact 最容易踩的三个坑**：
+
+| 坑 | 现象 | 解 |
+| --- | --- | --- |
+| 只验证了「字段存在」，没验证「类型/单位」 | 对方返回字符串 `"238000"` 也通过 | 用 `numberType`/`stringValue` 明确类型 |
+| 状态处理（provider state）没实现 | 验证时数据不存在，全失败 | 每个 `given` 都要有对应 seed |
+| pact 文件没上传 Broker | 提供方 CI 拿不到最新契约 | CI 里加 `pact-broker publish` |
+
+---
+
+## 47.12 Agent 工具契约：完整 Schema 与服务端校验
+
+模型是「契约的另一种消费者」，而且它**不会问你**，只会猜。所以工具契约要比给人看的 API 文档更严格。
+
+### 完整工具定义（含边界）
+
+```json
+{
+  "name": "create_refund",
+  "description": "为指定订单创建退款单。金额单位是「分」。同一 request_id 重复调用返回同一退款单（幂等）。订单不存在返回 ORDER_NOT_FOUND（不要重试）；金额超过可退余额返回 EXCEED_BALANCE（应提示用户修改金额）。",
+  "parameters": {
+    "type": "object",
+    "required": ["request_id", "order_id", "amount_cents"],
+    "additionalProperties": false,
+    "properties": {
+      "request_id": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "description": "幂等键，UUID v4。同一次用户操作的所有重试必须复用同一个值。"
+      },
+      "order_id": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "订单 ID（18 位整数），不是订单号字符串。"
+      },
+      "amount_cents": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 100000000,
+        "description": "退款金额，单位「分」。2380.00 元 = 238000。"
+      },
+      "reason": {
+        "type": "string",
+        "enum": ["CUSTOMER_REQUEST", "OUT_OF_STOCK", "DAMAGED", "OTHER"],
+        "description": "退款原因枚举。选 OTHER 时必须同时在 note 里说明。"
+      },
+      "note": { "type": "string", "maxLength": 200 }
+    }
+  }
+}
+```
+
+**这段 schema 里每一行都在防一种失败**：
+
+| 写法 | 防的是什么 |
+| --- | --- |
+| `additionalProperties: false` | 模型编造字段（`"currency": "USD"`） |
+| `pattern` 约束 UUID | 模型传 `"1"` 或 `"req-1"` |
+| `minimum: 1` + `maximum` | 负数退款、超大额 |
+| `type: integer` + 描述「分」 | 模型传 `2380.00`（浮点）或「2380元」 |
+| `enum` | 模型自创 reason |
+| `description` 里写清错误码 | 模型无限重试不存在的数据 |
+| `required` 不含可选字段 | 模型被强制填无意义的值 |
+
+### 服务端二次校验（不信模型）
+
+```go
+type CreateRefundArgs struct {
+	RequestID   string `json:"request_id" validate:"required,uuid4"`
+	OrderID     int64  `json:"order_id" validate:"required,gt=0"`
+	AmountCents int64  `json:"amount_cents" validate:"required,gt=0,lte=100000000"`
+	Reason      string `json:"reason" validate:"required,oneof=CUSTOMER_REQUEST OUT_OF_STOCK DAMAGED OTHER"`
+	Note        string `json:"note" validate:"max=200"`
+}
+
+func (t *RefundTool) Execute(ctx context.Context, raw json.RawMessage) (Result, error) {
+	var a CreateRefundArgs
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()          // ★ 拒绝未知字段（与 schema 一致）
+	if err := dec.Decode(&a); err != nil {
+		return Result{}, ToolError("INVALID_JSON", "参数不是合法 JSON："+err.Error())
+	}
+	if err := validate.Struct(a); err != nil {
+		// ★ 错误信息要可行动：告诉模型哪个字段错了、应该是什么
+		return Result{}, ToolError("INVALID_ARGUMENT", humanize(err))
+	}
+	// 业务校验：可退余额
+	remain, err := t.repo.RefundableCents(ctx, a.OrderID)
+	if err != nil { return Result{}, ToolError("INTERNAL", "查询可退余额失败，可重试") }
+	if a.AmountCents > remain {
+		return Result{}, ToolError("EXCEED_BALANCE",
+			fmt.Sprintf("可退余额为 %d 分，你请求的是 %d 分", remain, a.AmountCents))
+	}
+	// 幂等执行（第 2 章）
+	return t.svc.CreateIdempotent(ctx, a)
+}
+```
+
+### 错误契约：模型能不能自我修正，全看这里
+
+| 错误返回 | 模型的反应 | 是否可行动 |
+| --- | --- | --- |
+| `{"error":"500 Internal Server Error"}` | 重试 3 次 → 放弃/幻觉 | ❌ |
+| `{"error":"invalid argument"}` | 猜哪里错 → 再错 | ❌ |
+| `{"code":"INVALID_ARGUMENT","field":"amount_cents","message":"必须是正整数，你传了 -100"}` | 改成正数 | ✅ |
+| `{"code":"EXCEED_BALANCE","message":"可退余额 5000 分，你请求 8000 分","suggestion":"改为 ≤5000"}` | 改金额 | ✅ |
+| `{"code":"ORDER_NOT_FOUND","retryable":false}` | 停止重试，告知用户 | ✅ |
+
+> 🩸 **工具错误信息的质量，直接决定 Agent 的成功率**。同一条链路，把 `500` 改成「字段级可行动错误」，任务成功率能从 60% 提到 85%（多个团队的实测区间）。
+
+---
+
+## 47.13 一页速记
 
 | 关键词 | 必须记住的结论 |
 | --- | --- |
@@ -342,7 +578,7 @@ oasdiff breaking --base api-v1.yaml --revision api-v2.yaml
 | 错误 | 错误信息要可行动：错误码 + 原因 + 建议动作 |
 | 一句话 | **先钉死「什么算对」，再让模型去写；每写一步，让机器判一次。** |
 
-## 47.11 自检题
+## 47.14 自检题
 
 1. **为什么「让模型先写实现，再照着实现写测试」是反模式？**
    > 要点：测试与实现同源，会互相印证同一个错误理解（模型把「元」当「分」，测试也按「元」写，全绿但线上差 100 倍）。正确顺序是人根据契约写测试（先红），模型实现让测试转绿——测试是**独立的判据**，不能由被验证方生成。
@@ -353,7 +589,7 @@ oasdiff breaking --base api-v1.yaml --revision api-v2.yaml
 3. **模型改完代码说「已完成」，你怎么在 2 分钟内确认？**
    > 要点：让它跑 `make verify` 并贴输出（编译/vet/lint/单测 -race）；看 `git diff --stat` 确认改动范围（是否只改了约定文件）；看 `git diff` 里是否有空 catch、共享 map、缺 tenant_id；最后看测试是否**新增**（而不是只改了实现）。
 
-## 47.12 延伸阅读
+## 47.15 延伸阅读
 
 - 上一章：[46. 小上下文写大项目](46-small-context-large-project.md)
 - 下一章：[48. 工具链与反模式](48-context-toolchain-antipatterns.md)
