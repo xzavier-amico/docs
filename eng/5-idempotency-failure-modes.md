@@ -12,6 +12,15 @@
 
 2025-08-18 20:00 大促开闸，90 分钟内：
 
+| 时间 | 事件 | 数据 |
+| --- | --- | --- |
+| 20:00:30 | 流量峰值到达，网关 P99 从 180ms 抬到 3.4s | QPS 9,800 |
+| 20:00:31 | 网关 3s 超时开始重试，服务同步重试 3 次 | 每单放大 9 倍 |
+| 20:02 | 订单服务 CPU 42%，但订单表写入 TPS 从 900 涨到 **7,600** | 写入放大 8.4× |
+| 20:05 | 幂等命中率指标为 **0**（当时没人看这个指标） | 0 命中 |
+| 20:39 | 运营发现两个爆款售罄但库存流水对不上 | 多扣 5,200 件 |
+| 21:30 | 人工在网关关闭重试并限流，重复停止 | 已产生 3,700 笔 |
+
 - 同一用户重复下单 **3,700 笔**，其中 **1,140 笔已支付**；
 - 退款 + 补偿券 + 客服工时合计 **120 万元**，客诉 **486 起**；
 - 库存被多扣 5,200 件，两个爆款提前售罄，正常用户看到「无货」。
@@ -27,6 +36,28 @@
 ```
 
 > 🩸 **本章最贵的一条**：**压测必须模拟「同一个业务意图的重复」，而不是「N 个不同业务意图的并发」。** 前者验证幂等，后者只验证吞吐。大部分团队的幂等测试都测错了对象。
+
+### 事故二：24 小时的 TTL，撞上 26 小时的补发（2026-01-09）
+
+同一家公司换了业务线（自动续费订阅），也换了人，但踩的是模式 2。把时间线摊开看，20 分钟里没有任何一行日志是 ERROR：
+
+| 时间 | 事件 | 数据 |
+| --- | --- | --- |
+| D0 10:02:11 | 用户发起续费，扣款请求带 `Idempotency-Key=renew-U88-20260109` | 首次 |
+| D0 10:02:13 | 渠道处理成功，但回调超时未到 | 渠道侧已扣 199 元 |
+| D0 10:02:14 | 我方按 3s 超时置为 `PAYING`，进入主动查询 | 无异常日志 |
+| D0 10:05 | 主动查询得「处理中」，退避到 30 分钟一次 | — |
+| D0 15:00 | 查询任务被「当日任务队列清空」逻辑提前终止（bug） | 状态停在 `PAYING` |
+| D1 09:15:40 | 渠道 T+1 补发回调 | 距首次 23h13m |
+| D1 09:15:41 | 幂等键 TTL=24h 尚未过期 → 命中，返回「处理中」 | 正确 |
+| D1 11:02:20 | 渠道重试第 2 次补发 | 距首次 **25h00m09s**，TTL 已过期 |
+| D1 11:02:21 | 幂等表无记录 → 判定为首次 → **第二次扣款** | 重复 199 元 |
+| D1 11:02:22 | 订阅期被延长 1 个月 | 权益重复发放 |
+| D1 11:47 | 客服收到第 3 起投诉，人工核对发现 | 已过 45 分钟 |
+
+结果：受影响的订阅用户 **2,180 人**，重复扣款 **43.4 万元**，退款手续费与补偿 **6.8 万元**，另有 2 名用户在社交平台发帖。根因一行就写完：**`TTL=24h`，而渠道的最长补发窗口是 72 小时**——两个数字分别由两个团队在两张配置表里维护，没人把它们放在一起看过。
+
+> 💡 这两个事故分别对应「键漂移」和「TTL 太短」，正好是六类漏点里的「键」与「时间」。它们共同说明一件事：**幂等的失效几乎从不出现在压测报告里，只出现在对账和客诉里。**
 
 ---
 
@@ -242,6 +273,127 @@ try {
 
 > 💡 `constraintOf(e)` 是解析驱动异常 message 里的键名——**跨 MySQL 版本不稳**。更稳的做法是：捕获后按 `(scope, key_hash)` 读回记录，读到就按记录分支，读不到才抛出（说明是别的唯一键冲突）。这条规则应该写进团队规范。
 
+### 5.4.4 机制下沉：那条 `INSERT` 在 InnoDB 里到底发生了什么
+
+「靠唯一索引兜底」这句话被引用得太多，以至于很多人不知道它在并发下**为什么会阻塞、为什么返回 1062、为什么有时返回 1205**。不搞清楚这三个，你就分不清「重复请求」和「数据库被我锁住了」。
+
+```
+幂等记录状态机（唯一键 uk(scope,key_hash) 是唯一入口）
+
+              INSERT …… 冲突
+   ┌────────┐  (1062)   ┌────────────┐  lease 到期，条件 UPDATE 抢占
+   │ 不存在 ├──────────►│ PROCESSING │◄──────────────┐
+   └────┬───┘            └──┬──────┬──┘               │
+        │ INSERT 成功        │      │ 业务抛异常        │
+        ▼                   │      │ （同事务回滚）     │
+   ┌────────────┐           │      └──────────────────┘
+   │ PROCESSING │───────────┘   （占位消失 → 回到「不存在」）
+   └────┬───────┘
+        │ 业务成功 + markDone（同一事务提交）
+        ▼
+   ┌────────────┐   expire_at 到期   ┌────────────┐
+   │    DONE    │───────────────────►│ 分区 DROP  │
+   └────────────┘   （TTL 已覆盖重试窗口，可安全遗忘）
+```
+
+| 当前状态 | 事件 | 结果 | 关键条件 |
+| --- | --- | --- | --- |
+| 不存在 | `INSERT` 成功 | PROCESSING，本次为 owner | — |
+| 不存在 | `INSERT` 撞唯一键 | 等待/1062，转「读回」 | 同一 `(scope,key_hash)` |
+| PROCESSING | 另一请求 `INSERT` | 1062 → 读回 → 409/425 | 必须返回**可重试**语义，不能 500 |
+| PROCESSING | `lease_until` 已过 | 条件 `UPDATE` 抢占成功 | `WHERE status='PROCESSING' AND lease_until<NOW(3)` |
+| PROCESSING | 业务异常且同事务 | 回滚到「不存在」 | 占位与业务在**同一事务** |
+| DONE | 再次 `INSERT` | 1062 → 读回 → 重放响应 | 响应体已落库 |
+| 任意 | `expire_at` 到期 | 分区 DROP，可重新受理 | TTL ≥ 重试窗口 × 2 |
+
+**InnoDB 侧的真实动作**（以 MySQL 8.0 为准）：
+
+1. `INSERT` 前先在唯一索引上做**重复键检查**。若目标键已存在且由**未提交**的事务持有，当前事务会在该索引记录上加共享锁（S LOCK）并**等待**——所以并发同键插入不是「立刻报错」，而是排队的。
+2. 持有者提交 → 等待者拿到 `ERROR 1062 (23000): Duplicate entry 'order:create:9f2c…' for key 'uk_idem_scope_key'`；持有者回滚 → 等待者插入成功。**这就是「先查后写」永远给不了的原子性**。
+3. 等待超过 `innodb_lock_wait_timeout`（默认 50s）→ `ERROR 1205 (HY000): Lock wait timeout exceeded`。**1205 不是重复，是锁争用**：把它也当「重复请求」返回 200，就是模式 5 的变种，而且会把一个慢事务伪装成一次成功。
+4. 死锁（两个事务各占一个键再争另一个）→ `ERROR 1213 (40001)`，InnoDB 已回滚整个事务。重试必须在事务外（详见第 7 章 §7.4.2）。
+
+> ⚠️ **不要用 `INSERT ... ON DUPLICATE KEY UPDATE` 的 affected rows 判断「是否首次」**。它的返回值语义是 1=插入、2=更新、0=值未变化；在并发下还会对已存在行加 X 锁，把「读」变成「写」，热点键上极易死锁。判断首次请用**纯 `INSERT` + 1062**，别用这个语法糖。
+
+### 5.4.5 Redis 只能做前置去重，不能当幂等权威
+
+99% 的性能优化冲动都是「每次都写 MySQL 太重，前面加个 Redis」。可以加，但必须认清它的角色：**它是缓存，不是账本**。Redis 主从切换会丢未同步的键（异步复制），此时同一请求会被判为「首次」——而 MySQL 的唯一键仍然会挡住第二次写。顺序必须是 Redis 挡流量、DB 挡正确性。
+
+```lua
+-- KEYS[1] = idem:{scope}:{keyHash}      ARGV[1] = 占位 token（本次请求 ID）  ARGV[2] = ttl_ms
+-- 返回 1 = 抢到；0 = 已存在（调用方再 GET 一次拿状态，重放或回 409）
+-- 必须单脚本：GET 与 SET 分成两次往返，中间就有一个「都读到空」的窗口
+local cur = redis.call('GET', KEYS[1])
+if cur then return 0 end
+redis.call('SET', KEYS[1], ARGV[1], 'PX', tonumber(ARGV[2]))
+return 1
+```
+
+```bash
+# 验证脚本的原子性：200 并发打同一个 key，只允许一个拿到 1
+seq 200 | xargs -P 200 -I{} redis-cli --raw --eval idem.lua idem:test:same , tok-{} 86400000 \
+  | grep -c '^1$'
+# 期望输出 1；输出 2 以上说明用了 GET+SET 两次往返，或 client 做了 pipeline 重试
+```
+
+### 5.4.6 Java 侧：抢占与落库必须在同一个事务里
+
+Go 版本在 §5.4.2，Java 版本的关键差异是**代理与 ThreadLocal**（第 7 章的十坑在这里全部适用）。下面这段是「占位 + 业务 + 标 DONE」的完整形状：
+
+```java
+@Service
+public class IdempotentExecutor {
+
+    @Resource private TransactionTemplate txTemplate;   // 显式事务，避开自调用坑
+    @Resource private IdemMapper idemMapper;
+
+    public <T> T execute(String scope, String clientToken,
+                         Class<T> respType, Supplier<T> business) {
+        String keyHash = sha256(scope + "|" + clientToken);
+
+        try {
+            return txTemplate.execute(status -> {
+                // 1) 抢占：纯 INSERT，靠 uk_idem_scope_key 定胜负
+                idemMapper.insertProcessing(scope, keyHash, nodeId(), 15, 7 * 24 * 3600);
+                // 2) 业务写：同一事务，失败一起回滚（模式 6 的正解）
+                T out = business.get();
+                // 3) 标 DONE：affected rows 必须是 1，否则说明租约被别人抢走了
+                int n = idemMapper.markDone(scope, keyHash, 200, Json.write(out));
+                if (n != 1) {
+                    throw new IllegalStateException("lease lost: " + scope + "/" + keyHash);
+                }
+                return out;
+            });
+        } catch (DuplicateKeyException e) {
+            Record rec = idemMapper.get(scope, keyHash);       // 读回，不猜
+            if (rec == null) throw e;                          // 别的唯一键冲突 → 真错误
+            if ("DONE".equals(rec.getStatus())) {
+                return Json.read(rec.getResponseBody(), respType); // 重放
+            }
+            throw new InProgressException("duplicate in flight, retry after 1s");
+        }
+    }
+}
+```
+
+```sql
+-- markDone 的完整语句：条件更新是「租约」语义的关键，缺了 WHERE 就会覆盖别人的结果
+UPDATE idempotency_record
+   SET status = 'DONE', response_code = ?, response_body = ?, updated_at = NOW(3)
+ WHERE scope = ? AND key_hash = ? AND status = 'PROCESSING';
+
+-- 巡检：卡在 PROCESSING 超过 5 分钟的（模式 6 的现场）
+SELECT scope, COUNT(*) AS stuck, MIN(updated_at) AS oldest
+  FROM idempotency_record
+ WHERE status = 'PROCESSING' AND updated_at < NOW(3) - INTERVAL 5 MINUTE
+ GROUP BY scope ORDER BY stuck DESC;
+
+-- 清理：按分区 DROP，绝不 DELETE（DELETE 会锁表、写 undo、污染 binlog）
+ALTER TABLE idempotency_record DROP PARTITION p202601;
+```
+
+> 💡 注意 `markDone` 的 `n != 1` 检查。它在真实事故里救过一次：租约 15s 到期后被另一个节点抢占，原节点慢悠悠回来把别人的结果覆盖成了自己的——**一个少了 `WHERE status='PROCESSING'` 的 UPDATE，就是模式 10 的数据库版本**。
+
 ---
 
 ## 5.5 双修对照：传统 vs Agent
@@ -281,7 +433,7 @@ try {
 | 6 | **幂等表与业务表不同事务** | `PROCESSING` 永久卡死，重试永远 409；或业务成功但幂等表回滚 → 下一次重复 | 两个 `DataSource`；`@Transactional` 自调用失效（第 7 章）；`@Async` 线程 | `SELECT COUNT(*) FROM idempotency_record WHERE status='PROCESSING' AND updated_at < NOW()-INTERVAL 5 MINUTE`；`age>1min` 即异常 | 同事务；退一步用 `lease_until` 租约回收 | 幂等表与业务表**强制同库**；跨库要在评审时说明并由对账兜 |
 | 7 | **重试换新 request_id** | 同一业务单对应多个 `request_id`；每层都「首次」 | 网关/客户端/服务各生成一份；中间件覆写 header | trace 里同一业务单出现多个 `request_id`；网关 access log 与上游入参比对 | 客户端生成、全链路透传、网关只读不写 | header 白名单：网关只允许 `X-Request-Id` 透传，禁止 rewrite（配置评审项） |
 | 8 | **网关重试 + 服务重试叠加** | 重复 9~27 次；下游被打爆、日志刷屏 | 多层重试、每层独立、无重试预算 | 入口 QPS ÷ 唯一业务意图数 > 1.3；`X-Retry-Count` 累加值；下游收到次数 | 只留一层重试（推荐网关不重试、服务重试）；全局重试预算 ≤ 原流量 20% | 重试拓扑图画出来贴在 SRE 文档；重试指标进看板 |
-| 9 | **时钟回拨** | 发号器 ID 重复 → 唯一索引冲突 → 被模式 5 吞掉变成「少卖」；或基于时间窗口的键互相覆盖 | NTP 回拨、容器时钟漂移、VM 迁移 | `ntpq -p`/`chronyc tracking` 的 offset；`SELECT entry_no,COUNT(*) FROM journal_entry GROUP BY 1 HAVING COUNT(*)>1` | 发号器检测回拨：`if now < lastTs { wait | reject }`；workerId 隔离 | 时钟 offset 监控（>50ms 告警）；**禁止用时间做唯一键的任何组成部分** |
+| 9 | **时钟回拨** | 发号器 ID 重复 → 唯一索引冲突 → 被模式 5 吞掉变成「少卖」；或基于时间窗口的键互相覆盖 | NTP 回拨、容器时钟漂移、VM 迁移 | `ntpq -p`/`chronyc tracking` 的 offset；`SELECT entry_no,COUNT(*) FROM journal_entry GROUP BY 1 HAVING COUNT(*)>1` | 发号器检测回拨：`now < lastTs` 时等待或直接拒绝；workerId 隔离 | 时钟 offset 监控（>50ms 告警）；**禁止用时间做唯一键的任何组成部分** |
 | 10 | **分布式锁超时提前释放** | 并发重复；锁 TTL 3s、业务 GC STW 4.2s | 锁过期；Redis 主从切换丢锁；续期线程被饿死 | 锁持有时间 P99 vs TTL 的比值（>0.5 就危险）；Redis `slowlog`；GC 日志里的 STW | 看门狗续期（Redisson `lockWatchdogTimeout`）+ **锁内再查结果表**；跨资源用 fencing token | 锁只做「减少并发」，正确性必须由结果表/唯一键保证；锁 TTL ≥ 业务 P99 × 3 |
 
 ### 5.6.2 三处最值得单独讲的
