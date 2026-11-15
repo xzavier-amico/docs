@@ -23,7 +23,7 @@ public void applyStatus(OrderEvent e) { ... }   // 火忘式调用，listener �
 - 实际发货 **1,240 件**，逆向物流与折价损失 **74 万元**；
 - 客诉 380 单，修复用了 6 小时（逐单比对支付流水与取消时间）。
 
-**事故二（同月大促，堆积）**：同一个 Topic，峰值生产 **18 万 msg/s**，24 个分区，单分区消费能力约 **800 msg/s**，总消费能力 **1.92 万/s**。20:00 开始堆积以 **16 万/s** 增长，30 分钟堆了 **2,880 万条**。值班同学把消费者从 24 实例扩到 48 实例，**lag 一点没降**——因为分区只有 24 个，多出来的 24 个实例分不到分区，全程空转。直到 00:12 才消化完，端到端延迟 **4 小时 12 分**。
+**事故二（同月大促，堆积）**：同一个 Topic，峰值生产 **18 万 msg/s**，24 个分区，单分区消费能力约 **800 msg/s**，总消费能力 **1.92 万/s**。20:00 开始堆积以 **16 万/s** 增长，30 分钟堆了 **2,880 万条**。值班同学把消费者从 24 扩到 48 实例，**lag 一点没降**——分区只有 24 个，多出的实例分不到分区，全程空转。直到 00:12 才消化完，端到端延迟 **4 小时 12 分**。
 
 > 🩸 **两个事故的共同点**：第一个把「读取顺序」当成了「执行顺序」，第二个把「消费者数量」当成了「消费能力」。**顺序由分区和线程共同决定，吞吐由分区数封顶**——这两句话值 74 万。
 
@@ -31,7 +31,7 @@ public void applyStatus(OrderEvent e) { ... }   // 火忘式调用，listener �
 
 ## 25.2 到底是什么：顺序 = 分区键 + 单线程
 
-**定义**：对同一个业务键（`order_id`、`user_id`、`session_id`），消息被**处理的顺序**与**产生的顺序**一致。注意是「处理」不是「发送」，也不是「读取」。
+**定义**：对同一个业务键（`order_id`、`user_id`、`session_id`），消息被**处理的顺序**与**产生的顺序**一致。注意是「处理」，不是「发送」或「读取」。
 
 三个必须拆开的反例：
 
@@ -46,7 +46,7 @@ public void applyStatus(OrderEvent e) { ... }   // 火忘式调用，listener �
 最大吞吐   = 分区数 × 单分区处理能力
 ```
 
-所以要保序的「活跃 key 数」决定了分区数下限：你有 5 万个活跃订单，24 个分区意味着平均每个分区要串行处理 2,000 个订单的事件。**分区不是越多越好**（分区多则 rebalance 慢、文件句柄多、端到端延迟高），但少于「峰值吞吐 ÷ 单分区能力」就一定堆积。
+所以要保序的「活跃 key 数」决定了分区数下限：5 万个活跃订单、24 个分区，平均每分区要串行处理 2,000 个订单的事件。**分区不是越多越好**（rebalance 慢、句柄多、延迟高），但少于「峰值吞吐 ÷ 单分区能力」就一定堆积。
 
 ---
 
@@ -203,7 +203,7 @@ Java（Spring Kafka，`concurrency` = 分区数，listener 内**绝不再开线�
 ```java
 @KafkaListener(topics = "order.events", concurrency = "24")
 public void onMessage(ConsumerRecord<String, String> rec, Acknowledgment ack) {
-    // 同一个分区由同一个线程串行调用；不要在方法体里 submit 到别的池
+    // 同一分区由同一线程串行调用；别再 submit 到别的池
     OrderEvent e = json.read(rec.value(), OrderEvent.class);
     orderStateMachine.apply(e);      // 内部用 WHERE status IN (...) 做条件更新
     ack.acknowledge();               // 处理完成才提交位点
@@ -238,13 +238,13 @@ public void dispatch(ConsumerRecord<String, String> rec, Acknowledgment ack) {
 }
 ```
 
-> 💡 上面是简化版：生产上位点必须由分区线程按「连续完成水位」提交。嫌复杂就**改上游 key**，别在消费端造调度器。
+> 💡 简化版：生产上位点必须按「连续完成水位」提交。嫌复杂就**改上游 key**，别造调度器。
 
 Go（Sarama，`ConsumeClaim` 每个分区一个 goroutine，天然分区内串行）：
 
 ```go
 func (h *Handler) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
-	// Sarama 保证：同一个 partition 的 ConsumeClaim 只有一个 goroutine 在跑
+	// Sarama 保证：每个 partition 只有一个 ConsumeClaim goroutine
 	for msg := range claim.Messages() {
 		var e OrderEvent
 		if err := json.Unmarshal(msg.Value, &e); err != nil {
@@ -282,7 +282,7 @@ func (h *Handler) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.Co
 2. **顺序的边界从「订单」变成「会话」**。同一 `session_id` 的多个 Run 可能并发，业务要决定「串行还是打断」；`run_id` 内的 Step 必须按 `seq`。
 3. **堆积的含义变了**。传统 lag 是条数，Agent 的 lag 是「**排队 Run 数 × 单 Run token 成本**」；10 万个 Run 排队可能是 300 万元在途预算。
 
-> 用三定律检验：**状态机**——真相源在 `Run`/`Step` 表，消息顺序只影响「谁先被通知」，不影响终态；**稀缺资源**——传统限分区与线程，Agent 限模型并发与 TPM；**不可回滚**——乱序导致的「未审批就执行工具」无法撤销，只能事前用状态机守卫（`approval_status=APPROVED` 才允许调用）。
+> 三定律：**状态机**——真相源在 `Run`/`Step` 表，消息顺序只影响「谁先被通知」；**稀缺资源**——传统限分区，Agent 限模型并发与 TPM；**不可回滚**——乱序导致「未审批就执行工具」无法撤销，只能事前用状态机守卫。
 
 ---
 
@@ -292,12 +292,12 @@ func (h *Handler) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.Co
 | --- | --- | --- | --- | --- | --- |
 | 1 | 已取消订单又发货 | listener 内 `@Async`/线程池，执行顺序错乱 | 比对 offset 与 `updated_at` | 去掉内部线程池，改同步处理 | Code review 禁止 listener 内 `@Async` |
 | 2 | 扩分区后大量状态回退 | key→分区映射改变，旧 key 的历史消息在新分区 | 对齐扩分区时间 | 扩分区选低峰；迁移窗口内按 key 串行；状态机加版本号 | 关键 Topic 一次预留足够分区 |
-| 3 | 重试消息把状态改回旧值 | 重试 Topic 绕过原分区，迟到的旧消息覆盖新状态 | 查重试 Topic 的消费时间与业务版本号 | 条件更新 `WHERE version < ?`；同 key 阻塞 | 所有状态更新带版本号 |
+| 3 | 重试消息把状态改回旧值 | 重试 Topic 绕过原分区，迟到的旧消息覆盖新状态 | 查重试消费时间与版本号 | 条件更新 `WHERE version < ?`；同 key 阻塞 | 所有状态更新带版本号 |
 | 4 | 扩容后 lag 不降 | 实例数 > 分区数，多出的实例空转 | `--describe` 看成员数与分区数 | 实例数 ≤ 分区数；或扩分区 | 容量模型写进告警：实例数/分区数 |
 | 5 | 单分区 lag 涨、其它正常 | 毒消息卡住（某条反序列化失败/下游超时） | `jstack` 看线程栈；看该 offset 内容 | 转 DLQ，reset 位点，修数据 | 消费端加「单条超时 + 失败计数」 |
 | 6 | lag 锯齿状、频繁 rebalance | `max.poll.interval.ms` 小于单批处理时间；GC 停顿；网络抖动 | 看 rebalance 原因日志 | 降 `max.poll.records`、调大 poll interval、静态成员 | 单批处理时间 < poll interval/2 |
 | 7 | rebalance 后重复数万条 | revoke 时没提交位点；自动提交提交的是拉取位置 | 对比 `CURRENT-OFFSET` 与业务已处理数 | `onPartitionsRevoked` 同步提交；关自动提交 | 位点提交策略纳入上线检查 |
-| 8 | 同一 session 的回复串台 | 消费端按 `run_id` 分区，但同一 session 的多个 Run 并行 | 按 session 重放事件，看 `seq` 是否交叉 | 改为按 `session_id` 分区 + 会话级串行 | 分区键 = 会话聚合根 |
+| 8 | 同一 session 的回复串台 | 按 `run_id` 分区，但同 session 的多个 Run 并行 | 按 session 重放事件，看 `seq` 是否交叉 | 改为按 `session_id` 分区 + 会话级串行 | 分区键 = 会话聚合根 |
 
 ---
 
@@ -316,7 +316,7 @@ mysql -e "SELECT COUNT(*), MIN(seq), MAX(seq), COUNT(DISTINCT seq)
           FROM order_event_log WHERE order_id='order-42'"
 ```
 
-**② 堆积演练**：停掉消费者 10 分钟，确认 lag 告警在 2 分钟内触发、扩容后 5 分钟内开始下降：
+**② 堆积演练**：停消费者 10 分钟，确认 lag 告警 2 分钟内触发、扩容后 5 分钟开始下降：
 
 ```bash
 # 暂停消费组（或直接 kill 实例）
@@ -373,7 +373,7 @@ SELECT partition_no,
 | 顺序校验 | —— | 同 key `seq` 连续性对账、状态迁移合法性 SQL |
 | 业务串行化 | —— | lane 路由 + 水位提交（尽量别做） |
 
-**判断口径**：分区、线程、位点这三件事，框架已经给了正确的原语；事故几乎都来自「在框架之上又加了一层自研并发」。**能靠 key 解决的就别写 lane，能靠状态机兜底的就别写分布式锁。**
+**判断口径**：分区、线程、位点，框架都给了原语；事故几乎都来自「在框架上又加一层自研并发」。能靠 key 就别写 lane，能靠状态机就别写分布式锁。
 
 ---
 
@@ -382,8 +382,7 @@ SELECT partition_no,
 | 关键词 | 必须记住的结论 |
 | --- | --- |
 | 顺序的定义 | 同一业务键的**处理顺序** = 产生顺序；不是发送顺序，也不是读取顺序 |
-| 顺序公式 | 顺序 = 同一个 key 进同一个分区 + 该分区同时只有一个线程 |
-| 并发公式 | 最大并发 = 分区数；最大吞吐 = 分区数 × 单分区能力 |
+| 顺序公式 | 顺序 = 同 key 同分区 + 分区内单线程；吞吐 = 分区数 × 单分区能力 |
 | 三种方案 | 单分区（全局有序、不能扩）、按 key 分区（99% 的选择）、业务串行化（最贵） |
 | 破序① 多分区 | key 不是聚合根 / 扩分区；key 必须创建后不变 |
 | 破序② 消费并发 | listener 内 `@Async`、`parallelStream` 是头号杀手 |

@@ -124,6 +124,56 @@ for s in "${SERIES[@]}"; do
   echo "  [$s] 已完成 $n / 待撰写 $m"
 done
 
+
+echo
+echo "═══ 5. 大纲清单 ↔ 章节状态 ═══"
+SYNC_FLAG="${1:-}" python3 - "${SERIES[@]}" <<'PY2'
+import os, re, sys
+args = sys.argv[1:]
+sync = os.environ.get("SYNC_FLAG") == "--sync"
+series = [a for a in args if not a.startswith("--")]
+mismatch = 0
+for s in series:
+    summ = os.path.join(s, "0-summary.md")
+    if not os.path.exists(summ):
+        continue
+    lines = open(summ, encoding="utf-8").read().split("\n")
+    done_n = pend_n = 0
+    for i, line in enumerate(lines):
+        m = re.match(r"^- \[( |x)\] (\d{1,2}) (.+)$", line)
+        if not m:
+            continue
+        checked, n, title = m.group(1) == "x", int(m.group(2)), m.group(3)
+        if n == 0:
+            continue
+        files = [f for f in os.listdir(s) if re.match(rf"^{n}-.+\.md$", f)]
+        if not files:
+            print(f"  ❌ [{s}] 第 {n} 章无文件：{title}")
+            mismatch += 1
+            continue
+        t = open(os.path.join(s, files[0]), encoding="utf-8").read()
+        is_done = "已完成" in t
+        if is_done and not checked:
+            if sync:
+                lines[i] = line.replace("- [ ]", "- [x]", 1)
+            else:
+                print(f"  ⚠️  [{s}] 第 {n:>2} 章已完成但清单未勾：{title}")
+                mismatch += 1
+        elif checked and not is_done:
+            if sync:
+                lines[i] = line.replace("- [x]", "- [ ]", 1)
+            else:
+                print(f"  ⚠️  [{s}] 第 {n:>2} 章未完成但清单已勾：{title}")
+                mismatch += 1
+        done_n += is_done
+        pend_n += not is_done
+    if sync:
+        open(summ, "w", encoding="utf-8").write("\n".join(lines))
+    print(f"  [{s}] 章节完成 {done_n} / 待写 {pend_n}" + ("（已同步清单）" if sync else ""))
+sys.exit(1 if mismatch and not sync else 0)
+PY2
+[ $? -ne 0 ] && fail=1
+
 echo
 if [ $fail -ne 0 ]; then
   echo "❌ 自检未通过"
