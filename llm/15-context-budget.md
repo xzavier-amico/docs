@@ -1,13 +1,13 @@
 # 15. 上下文预算：token 会计与分配策略
 
-> **状态**：`待撰写` ｜ **所属**：第四部分 · 上下文工程（Context Engineering） ｜ **编号**：15 / 45
-> **一句话导读**：把上下文窗口当内存分配：system / tools / memory / history / retrieval / output 六份预算怎么切；超预算的降级顺序；token 计量的四种口径（含流式）
+> **状态**：`待撰写` ｜ **所属**：第四部分 · 上下文工程（Context Engineering） ｜ **编号**：15 / 52
+> **一句话导读**：把上下文窗口当内存分配：system / tools / persona / memory / history / retrieval / output 七份预算怎么切；超预算的降级顺序；token 计量的四种口径（含流式）
 > **本章写作骨架**：场景账本（不做会怎样，带数字）→ 结构图 → 关键设计（schema/伪代码）→ Java 对照 → 开源坐标 → 事故清单 → 一页速记 + 自检题
 > **贯穿案例**：Aurora 平台（10 万租户 / 峰值 5k QPS / 单 Run 30 秒 / 流式输出）
 
 ## 本章计划小节
 
-1. 把上下文窗口当内存分配：system / tools / memory / history / retrieval / output 六份预算怎么切
+1. 把上下文窗口当内存分配：system / tools / persona / memory / history / retrieval / output 七份预算怎么切
 2. 超预算的降级顺序
 3. token 计量的四种口径（含流式）
 
