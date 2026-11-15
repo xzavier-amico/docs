@@ -14,6 +14,12 @@
 - **第一章**：[`go/1-mindset-shift.md`](go/1-mindset-shift.md) —— 心智模型重置（金标准风格样板）
 - **看进度**：`bash go/progress.sh` / `bash llm/progress.sh`（加 `--all` 看全量）
 
+## 从这里开始
+
+- 🧭 **总索引与学习路径**：[`INDEX.md`](INDEX.md) —— 106 章怎么串、5 条岗位路线、12 周计划、主题交叉映射表
+- 🇬🇬 **Go 语言与运行时**：[`go/0-summary.md`](go/0-summary.md)（54 章）
+- 🤖 **AgentOS 平台架构**：[`llm/0-summary.md`](llm/0-summary.md)（52 章）
+
 ## 两套文档的关系
 
 - **`go/`** 解决「语言与运行时」：goroutine/GMP、内存、GC、并发、net/http、工程化。
