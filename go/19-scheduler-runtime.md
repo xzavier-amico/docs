@@ -419,7 +419,7 @@ n, err := conn.Read(buf) // 看起来就是阻塞读，和 Java 的 InputStream.
    └─ internal/poll.(*FD).Read
         └─ syscall.Read(fd) ──▶ 返回 EAGAIN（非阻塞 fd，没数据）
              └─ fd.pd.waitRead()
-                  └─ consequential: runtime.netpollblock(pd, 'r', true)
+                  └─ runtime.netpollblock(pd, 'r', true)
                        ├ 把 pd.rg 从 0 CAS 成 pdWait
                        └ gopark(netpollblockcommit, &pd.rg,
                                 waitReasonIOWait, ...)   ← M 在这儿被释放！
