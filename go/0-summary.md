@@ -277,10 +277,10 @@
 - [ ] 13 string / []byte / rune 与零拷贝
 - [ ] 14 内存布局、对齐与逃逸分析
 - [ ] 15 内存分配器：mcache / mcentral / mheap
-- [ ] 16 unsafe 与 cgo 的边界
+- [x] 16 unsafe 与 cgo 的边界
 - [ ] 17 goroutine 源码与栈：`g`、`g0`、栈增长与泄漏本质
 - [ ] 18 GMP 数据结构与 `schedule()` 主循环逐段精读
-- [ ] 19 调度时机全景：抢占、syscall、netpoll、sysmon 与 timer
+- [x] 19 调度时机全景：抢占、syscall、netpoll、sysmon 与 timer
 - [ ] 20 channel 原理与编排模式
 - [ ] 21 select 与超时控制
 - [ ] 22 sync 原语实现
@@ -303,16 +303,16 @@
 - [ ] 39 实时通信：SSE / WebSocket / gRPC streaming 怎么选
 - [ ] 40 LLM 客户端：抽象、流式与韧性
 - [ ] 41 工具系统：Function Calling 全链路
-- [ ] 42 MCP：协议与 Go SDK 实战
-- [ ] 43 Agent 循环与编排引擎
+- [x] 42 MCP：协议与 Go SDK 实战
+- [x] 43 Agent 循环与编排引擎
 - [x] 44 RAG 管线：从文档到上下文
 - [x] 45 记忆与会话：状态一致性
 - [x] 46 多 Agent 协作与持久化执行
 - [x] 47 Agent 的生产化：多租户、限流与成本
 - [x] 48 langchaingo 精读
-- [ ] 49 eino 精读
-- [ ] 50 MCP Go SDK 源码精读
-- [ ] 51 读源码方法论 + 框架设计模式提炼
+- [x] 49 eino 精读
+- [x] 50 MCP Go SDK 源码精读
+- [x] 51 读源码方法论 + 框架设计模式提炼
 - [x] 52 生产部署与 SRE：把服务活到线上
 - [x] 53 综合项目：从零构建生产级 Agent 框架
 - [x] 54 Java 架构师的 Go 落地清单
