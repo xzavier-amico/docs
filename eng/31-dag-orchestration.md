@@ -423,7 +423,7 @@ func (s *Scheduler) Finish(ctx context.Context, t Task, result Result) error {
 				 WHERE id=$1 AND state='RUNNING'`, t.ID, result.Code, truncate(result.Msg, 1000))
 			if err != nil { return err }
 		}
-		return s.advanceDownstream(ctx, tx, t.RunID) // 见 §31.4.5
+		return s.advanceDownstream(ctx, tx, t.RunID) // 见 §31.4.4
 	})
 }
 ```

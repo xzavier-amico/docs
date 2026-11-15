@@ -259,6 +259,66 @@ func (w *Worker) Run(ctx context.Context) error {
 
 **为什么不直接「取出就删」**：取出即删 = 至多一次，处理者崩溃任务就永久消失（订单永不关单）。**「取出 → processing 集合 → ack 删除」是至少一次**，代价是可能重复，所以业务侧必须幂等。这就是第 24 章那条铁律在延迟队列里的复现。
 
+```java
+// Java：投递（ZADD）+ 消费（EVALSHA），与 Go 版共用同一份 Lua —— 两个语言的语义必须一模一样
+@Component
+public class RedisDelayQueue {
+
+    static final String POP_LUA = """
+        local due = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, tonumber(ARGV[2]))
+        if #due == 0 then return {} end
+        local leaseUntil = tonumber(ARGV[1]) + tonumber(ARGV[3])
+        for i = 1, #due do
+          redis.call('ZREM', KEYS[1], due[i])
+          redis.call('ZADD', KEYS[2], leaseUntil, due[i])
+        end
+        return due
+        """;
+
+    private final StringRedisTemplate redis;
+    private final DefaultRedisScript<List> pop;
+    private final DefaultRedisScript<Long> ack;
+
+    public RedisDelayQueue(StringRedisTemplate redis) {
+        this.redis = redis;
+        this.pop = new DefaultRedisScript<>(POP_LUA, List.class);
+        this.ack = new DefaultRedisScript<>(
+                "return redis.call('ZREM', KEYS[1], ARGV[1])", Long.class);
+    }
+
+    // 投递：Redis 只做「定时器」，任务真身必须落库（重启/Redis 丢数据时才能重建）
+    public void schedule(String queue, String taskId, Duration delay) {
+        long dueAt = System.currentTimeMillis() + delay.toMillis();
+        redis.opsForZSet().add("delay:{" + queue + "}", taskId, dueAt);
+        jdbc.update("""
+            INSERT INTO delay_task(task_id, queue_name, due_at, status)
+            VALUES (?, ?, FROM_UNIXTIME(? / 1000), 0)
+            ON DUPLICATE KEY UPDATE due_at = VALUES(due_at)
+            """, taskId, queue, dueAt);
+    }
+
+    @Scheduled(fixedDelay = 200)             // 精度 = 200ms + Lua 往返
+    public void pollOnce() {
+        String q = "order-timeout";
+        List<String> due = redis.execute(pop,
+                List.of("delay:{" + q + "}", "processing:{" + q + "}"),
+                String.valueOf(System.currentTimeMillis()), "100", "60000"); // 租约 60s
+        if (due == null || due.isEmpty()) return;
+        for (String taskId : due) {
+            // 每条独立提交到业务线程池；失败不 ack，租约到期由 recover 脚本搬回
+            executor.execute(() -> {
+                try {
+                    handler.handle(taskId);                       // 内部幂等（按 taskId 去重）
+                    redis.execute(ack, List.of("processing:{" + q + "}"), taskId);
+                } catch (Exception e) {
+                    log.warn("delay task failed, will retry after lease: {}", taskId, e);
+                }
+            });
+        }
+    }
+}
+```
+
 ### 第三步：时间轮的 Go 实现（注意 rounds 与回调隔离）
 
 ```go

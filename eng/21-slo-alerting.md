@@ -287,53 +287,9 @@ type Gate struct {
 }
 
 type gateResult struct {
-	Allow  bool
-	Reason string
-}
-
-func (g *Gate) Check(ctx context.Context, slo string, isFixOnly bool) (gateResult, error) {
-	q := fmt.Sprintf(`slo:%s:budget_remaining`, slo) // 例如 order_api
-	u := g.promURL + "/api/v1/query?query=" + url.QueryEscape(q)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	resp, err := g.client.Do(req)
-	if err != nil {
-		// Prometheus 挂了不允许发布：门禁失败要 fail-closed，不是 fail-open
-		return gateResult{false, "prometheus unavailable, gate fail-closed"}, err
-	}
-	defer resp.Body.Close()
-
-	var out struct {
-		Data struct {
-			Result []struct {
-				Value [2]any `json:"value"`
-			} `json:"result"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return gateResult{false, "bad prometheus response"}, err
-	}
-	if len(out.Data.Result) == 0 {
-		return gateResult{false, "no slo series, refuse to release"}, nil
-	}
-	raw, _ := out.Data.Result[0].Value[1].(string)
-	var remaining float64
-	fmt.Sscanf(raw, "%f", &remaining)
-
-	switch {
-	case remaining <= 0:
-		return gateResult{false, "预算已超支：全面冻结"}, nil
-	case remaining < 0.10:
-		if isFixOnly {
-			return gateResult{true, "预算 <10%，仅放行修复类变更"}, nil
-		}
-		return gateResult{false, "预算 <10%：只允许修复类发布"}, nil
-	case remaining < 0.25:
-		if isFixOnly {
-			return gateResult{true, "预算 <25%，放行修复类"}, nil
-		}
-		return gateResult{false, "预算 <25%：需技术负责人 + SRE 双签"}, nil
-	}
-	return gateResult{true, fmt.Sprintf("预算剩余 %.1f%%，正常发布", remaining*100)}, nil
+	Allow     bool
+	Reason    string
+	Remaining float64 // 0~1，可为负（已超支）
 }
 
 // Policy 把「剩余预算」映射成发布策略。这个映射必须只有一份实现（CI 与看板共用）
@@ -348,6 +304,51 @@ func Policy(remaining float64) string {
 	default:
 		return "NORMAL"
 	}
+}
+
+func (g *Gate) Check(ctx context.Context, slo string, isFixOnly bool) (gateResult, error) {
+	q := fmt.Sprintf(`slo:%s:budget_remaining`, slo) // 例如 order_api
+	u := g.promURL + "/api/v1/query?query=" + url.QueryEscape(q)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	resp, err := g.client.Do(req)
+	if err != nil {
+		// Prometheus 挂了不允许发布：门禁失败要 fail-closed，不是 fail-open
+		return gateResult{Allow: false, Reason: "prometheus unavailable, gate fail-closed"}, err
+	}
+	defer resp.Body.Close()
+
+	var out struct {
+		Data struct {
+			Result []struct {
+				Value [2]any `json:"value"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return gateResult{Allow: false, Reason: "bad prometheus response"}, err
+	}
+	if len(out.Data.Result) == 0 {
+		return gateResult{Allow: false, Reason: "no slo series, refuse to release"}, nil
+	}
+	raw, _ := out.Data.Result[0].Value[1].(string)
+	var remaining float64
+	fmt.Sscanf(raw, "%f", &remaining)
+
+	res := gateResult{Remaining: remaining}
+	switch Policy(remaining) {
+	case "FREEZE":
+		res.Reason = "预算已超支：全面冻结"
+	case "FIX_ONLY":
+		res.Allow = isFixOnly
+		res.Reason = "预算 <10%：只允许修复类发布"
+	case "REVIEW":
+		res.Allow = isFixOnly
+		res.Reason = "预算 <25%：需技术负责人 + SRE 双签"
+	default:
+		res.Allow = true
+		res.Reason = fmt.Sprintf("预算剩余 %.1f%%，正常发布", remaining*100)
+	}
+	return res, nil
 }
 
 // 每天 09:00 由调度任务跑一次，把结果写进 release_freeze 表，让所有人看得见
@@ -546,6 +547,76 @@ amtool silence add \
 # 巡检：所有超过 4 小时还在生效的静默（这是隐患）
 amtool silence query --alertmanager.url=http://alertmanager:9093 \
   | awk 'NR>1 {print}' # 生产上按 expiresAt 过滤 > 4h 的条目并推到值班群
+```
+
+```go
+// Go：静默审计。每天 09:00 跑，把「超期 / 无工单 / 覆盖过宽」的静默推到值班群，
+// 并自动删掉「expired 但没清」的条目。这是防「静默吃掉故障」最有效的一招。
+package silenceaudit
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+)
+
+type Silence struct {
+	ID        string    `json:"id"`
+	CreatedBy string    `json:"createdBy"`
+	Comment   string    `json:"comment"`
+	StartsAt  time.Time `json:"startsAt"`
+	EndsAt    time.Time `json:"endsAt"`
+	Status    struct {
+		State string `json:"state"` // active / pending / expired
+	} `json:"status"`
+	Matchers []struct {
+		Name    string `json:"name"`
+		Value   string `json:"value"`
+		IsRegex bool   `json:"isRegex"`
+	} `json:"matchers"`
+}
+
+func Fetch(ctx context.Context, c *http.Client, base string) ([]Silence, error) {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/v2/silences", nil)
+	resp, err := c.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var list []Silence
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return nil, err
+	}
+	return list, nil
+}
+
+// Audit 只返回「需要人看一眼」的静默；空切片 = 健康
+func Audit(list []Silence) []string {
+	var bad []string
+	for _, s := range list {
+		if s.Status.State != "active" {
+			continue
+		}
+		span := s.EndsAt.Sub(s.StartsAt)
+		hasTicket := strings.Contains(s.Comment, "CHG-") || strings.Contains(s.Comment, "INC-")
+		tooWide := len(s.Matchers) <= 1 // 只按 alertname 静默 = 同名告警全灭
+		switch {
+		case span > 4*time.Hour:
+			bad = append(bad, fmt.Sprintf("超期静默 id=%s by=%s span=%s endsAt=%s",
+				s.ID, s.CreatedBy, span, s.EndsAt.Format(time.RFC3339)))
+		case !hasTicket:
+			bad = append(bad, fmt.Sprintf("无工单号 id=%s by=%s comment=%q",
+				s.ID, s.CreatedBy, s.Comment))
+		case tooWide:
+			bad = append(bad, fmt.Sprintf("覆盖过宽 id=%s matchers=%d",
+				s.ID, len(s.Matchers)))
+		}
+	}
+	return bad
+}
 ```
 
 规矩三条：① 静默必须带 `CHG-` 或 `INC-` 前缀的工单号；② 单次 ≤ 4 小时，超时要重新申请（防止「永久静默」）；③ 每周清理一次「作者已离职 / 工单已关闭但静默仍在」的条目——这是最阴的一类事故来源。

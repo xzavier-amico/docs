@@ -690,7 +690,9 @@ public class RunReaper {
 
     @Scheduled(fixedDelay = 30_000)
     public void reap() {
-        // keyset 化的批量领取：一次 200 条，避免长事务锁住整个表
+        // 外层 SELECT 只是"候选集"（autocommit 下 SKIP LOCKED 的锁即刻释放，不要指望它去重）；
+        // 真正的并发安全靠 reclaim() 里的 CAS：state='RUNNING' AND lease_until < NOW(3)。
+        // 一次 200 条，避免长事务锁住整个表。
         List<Long> ids = jdbc.queryForList("""
             SELECT id FROM agent_run
              WHERE state = 'RUNNING'
