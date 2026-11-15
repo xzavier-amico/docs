@@ -552,7 +552,7 @@ Warning: 299 - "POST /v1/runs will be removed 2027-06-01, use POST /v2/runs"
 | `RequestContextHolder` | `context.Context` | 显式 vs 隐式：Go 里没有「当前请求」的魔法，所有 IO 函数第一个参数都是 ctx。这是**优点**，别想着用全局变量绕开 |
 | 审批流（Activiti/Flowable） | 审批回传 | 企业审批流的模型是「串行多级会签」，Agent 审批更像**一次性的风险确认**（有没有人会签 5 级？不会有，用户会跑掉） |
 
-**最容易被 Java 团队做错的一件事**：把 `POST /cancelete` 做成「同步等待 Run 停下再返回 200」。这在 Java 里很自然（`future.get(5, SECONDS)`），但在 5,000 并发取消时会**把网关线程池打穿**。正确姿势是 `202 Accepted` + 客户端轮询/订阅状态。异步是这个 API 的默认语义，不是优化。
+**最容易被 Java 团队做错的一件事**：把 `POST /runs/{id}/cancel` 做成「同步等待 Run 停下再返回 200」。这在 Java 里很自然（`future.get(5, SECONDS)`），但在 5,000 并发取消时会**把网关线程池打穿**。正确姿势是 `202 Accepted` + 客户端轮询/订阅状态。异步是这个 API 的默认语义，不是优化。
 
 ---
 

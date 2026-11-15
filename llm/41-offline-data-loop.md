@@ -2,7 +2,7 @@
 
 > **状态**：`已完成（初稿）` ｜ **所属**：第八部分 · 可观测、评估与数据闭环 ｜ **编号**：41 / 52
 > **本章定位**：线上每天产生 180 万次 Run，其中藏着几千条「系统哪里不行」的证据。这一章讲**怎么把这些证据变成评测集、训练数据和修复动作**——以及为什么「删除」比「采集」难十倍。
-> **读法**：§41.2 是数仓分层的落地表清单，§41.4 的失败聚类 SQL 可以直接跑；如果你只读一节，读 §41.6（隐私与删除传播）——它是唯一会让你被法务找上门的部分。
+> **读法**：§41.2 是数仓分层的落地表清单，§41.4 的失败聚类 SQL 可以直接跑；如果你只读一节，读 §41.4.6（隐私与删除传播）——它是唯一会让你被法务找上门的部分。
 
 ---
 
@@ -97,7 +97,7 @@
 | **人工确认 → 进 regression** | T+2 ~ T+7 | 标注队列 | 评测集 v 号 | 人是最慢的一环，要给它缓冲 |
 | **训练数据生产** | T+7 ~ T+14 | 月度批次 | `ads_sft_pool` / `ads_dpo_pairs` | 训练周期决定的 |
 | **微调 / 蒸馏** | T+30 | 季度或按需 | 模型注册表 | 训练 + 评测 + 灰度，一轮一个月 |
-| **删除传播** | T+0 ~ T+30 | 用户请求 / 租户解约 | 全链路 | **合规要求，最快的必须当天**（§41.6） |
+| **删除传播** | T+0 ~ T+30 | 用户请求 / 租户解约 | 全链路 | **合规要求，最快的必须当天**（§41.4.6） |
 
 > 💡 注意「事故样本 T+0」这一行。它的价值不在分析，在**「当天就要能回答客户『发生了什么』」**。所以 badcase 池不是分析工具，是**事故档案**。
 
@@ -145,7 +145,7 @@ CREATE TABLE dwd_fragment (
     in_badcase_pool Bool DEFAULT false,
     in_eval_set     Bool DEFAULT false,
     in_train_set    Bool DEFAULT false,
-    tombstoned      Bool DEFAULT false         -- 删除传播标记（§41.6）
+    tombstoned      Bool DEFAULT false         -- 删除传播标记（§41.4.6）
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(ts)
@@ -173,7 +173,7 @@ ENGINE = ReplacingMergeTree(cluster_version)
 PARTITION BY toYYYYMM(cluster_date)
 ORDER BY (cluster_id, cluster_date);
 
--- 3) 数据集清单（血缘的根，见 §41.7）
+-- 3) 数据集清单（血缘的根，见 §41.4.7）
 CREATE TABLE dataset_manifest (
     dataset_name    LowCardinality(String),
     dataset_version String,
@@ -299,7 +299,7 @@ include:
     priority: P2
 
 exclude:
-  - tombstoned = true                      # 已删除（§41.6）
+  - tombstoned = true                      # 已删除（§41.4.6）
   - tenant_consent = false                 # 未授权用于评测
   - text_len < 20                          # 太短，无法判定
   - contains_pii_unredacted = true

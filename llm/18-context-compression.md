@@ -200,7 +200,8 @@ func Compress(segs []Seg, budget int) ([]Seg, error) {
     }
 
     // ② 有损阶段：只对 history 做摘要，且有代数上限
-    if total = Sum(out); total > budget {
+    total = Sum(out)
+    if total > budget {
         for i := range out {
             if out[i].Name != "history" || out[i].Pinned {
                 continue

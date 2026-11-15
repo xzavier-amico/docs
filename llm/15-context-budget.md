@@ -483,7 +483,7 @@ SELECT date_trunc('day', occurred_at) AS d,
 ## 15.11 延伸阅读
 
 - 上一章：[14. 调度器设计：GPU/CPU 混合与并发度](14-scheduler-design.md)
-- 下一章：[16. 提示词资产化：模板、版本与评测驱动](16-prompt-asset.md)
+- 下一章：[16. 提示词资产化：模板、版本与评测驱动](16-prompt-as-asset.md)
 - OpenAI 官方文档：`usage` 对象、`prompt_tokens_details.cached_tokens`、`stream_options.include_usage`（以官方最新版为准）
 - Anthropic 官方文档：prompt caching、`cache_creation_input_tokens` / `cache_read_input_tokens`、流式 usage 事件
 - `tiktoken` 仓库、HuggingFace `tokenizers` 文档
