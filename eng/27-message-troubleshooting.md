@@ -730,6 +730,6 @@ SELECT biz_key, topic, partition_no, offset_no, created_at
 - Schema 演进：Protobuf「Updating A Message Type」（`reserved`、tag 永不复用）、Avro schema resolution（BACKWARD/FORWARD/FULL）、`buf breaking` 作为 CI 门禁
 - 重复与位点：[第 24 章](24-delivery-semantics.md)；顺序与堆积判定：[第 25 章](25-ordering-and-lag.md)；可靠性的八环节：[第 26 章](26-message-reliability.md)
 - 延迟重试与 CDC 的排查：[第 28 章](28-delayed-queue-cdc.md)；Top 30 故障形态速查：[第 51 章](51-troubleshooting-handbook.md)
-- Agent 侧 trace 与成本串联：见 [../llm/6-session-run-event-model.md](../llm/6-session-run-event-model.md)、[../llm/17-cost-control.md](../llm/17-cost-control.md)
+- Agent 侧 trace 与成本串联：见 [../llm/6-session-run-event-model.md](../llm/6-session-run-event-model.md)、[../llm/47-cost-engineering.md](../llm/47-cost-engineering.md)
 - 总纲：[0-summary.md](0-summary.md) ｜ 语言与运行时：[../go/0-summary.md](../go/0-summary.md) ｜ 平台治理：[../llm/0-summary.md](../llm/0-summary.md)
 - 前置：[第 26 章](26-message-reliability.md) ｜ 下一章：[第 28 章 延迟队列、定时任务与 CDC](28-delayed-queue-cdc.md)

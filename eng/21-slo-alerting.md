@@ -383,9 +383,14 @@ public class ReleasePolicyService {
     private static final double FIX_ONLY_LINE = 0.10;
 
     private final JdbcTemplate jdbc;
+    private final RestTemplate rest;
 
-    public ReleasePolicyService(JdbcTemplate jdbc) {
+    @Value("${prometheus.base-url}")
+    private String promUrl;
+
+    public ReleasePolicyService(JdbcTemplate jdbc, RestTemplate rest) {
         this.jdbc = jdbc;
+        this.rest = rest;
     }
 
     public Policy decide(double remaining) {
@@ -432,7 +437,14 @@ public class ReleasePolicyService {
     }
 
     private Double queryRemainingFromPrometheus(String sloKey) {
-        return null; // 实现略：HTTP 调 /api/v1/query?query=slo:<key>:budget_remaining
+        // slo_registry 里存的是 order-api-availability，PromQL 里的指标名用下划线
+        String q = "slo:" + sloKey.replace('-', '_') + ":budget_remaining";
+        String body = rest.getForObject(promUrl + "/api/v1/query?query={q}", String.class, q);
+        JsonNode result = Json.readTree(body).path("data").path("result");
+        if (!result.isArray() || result.isEmpty()) {
+            return null;                        // 查询无结果：不写快照，等下一次重试
+        }
+        return Double.parseDouble(result.get(0).path("value").get(1).asText());
     }
 }
 ```

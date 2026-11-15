@@ -264,11 +264,8 @@ func Exec(ctx context.Context, db *sql.DB, table, query string, args ...any) (sq
 ```
 
 ```sql
--- 影子表：结构必须与主表一致，但索引可以更少（压测不需要那么多二级索引）
-CREATE TABLE order_info_shadow LIKE order_info;
-ALTER TABLE order_info_shadow DISABLE KEYS;   -- MyISAM 时代的老写法；InnoDB 下用下面的方式
--- InnoDB 建议：直接建一份精简索引的副本，减少压测时的写放大
-DROP TABLE IF EXISTS order_info_shadow;
+-- 影子表：不要用 CREATE TABLE ... LIKE（会连索引一起复制，写放大 = 生产的两倍）
+-- 正确做法：手写一份「只保留必要索引」的副本，主键必须一致
 CREATE TABLE order_info_shadow (
   order_id      BIGINT UNSIGNED NOT NULL,
   user_id       BIGINT UNSIGNED NOT NULL,
@@ -609,6 +606,7 @@ echo "POST http://agent.internal/v1/runs" | vegeta attack \
 | **容量单位** | QPS、并发连接、DB 连接 | QPS + **并发长连接** + **模型并发** + TPM | 单位扩展 |
 | **瓶颈顺序** | 连接→池→锁→GC→下游 | 同上 + **供应商 RPM/TPM** + **单 Run 预算** | 多两层 |
 | **失败模式** | 压测污染生产、扩容打满连接池 | 加：**压测烧掉当月预算**；重复 Step 让压测成本翻倍 | 多一个成本维度 |
+| **恢复方式** | 压测中断就重跑脚本，无状态、无成本 | **从 `run_checkpoint` 续跑**；重跑整条 Run = 重花一次 token | **异**：长事务 + 成本 |
 | **验证方法** | 阶梯加压找拐点、五层信号对齐 | 同 + **token 计量对账**（压测消耗 vs 账单）+ 流式连接保持率 | 同 + 一笔账 |
 | **成本结构** | 机器折旧（压测边际成本 ≈ 0） | **按次计费**（压 1 万 Run ≈ 900 元） | **异（根因：成本显性且按量）** |
 | **稀缺资源** | 线程、连接、DB | **TPM、模型并发、预算** | 限的对象不同 |
