@@ -316,5 +316,5 @@ verify: ## 模型改完必须跑这个
 - 上一章：[45. 一次故障的两份报告](45-incident-two-reports.md)
 - 下一章：[47. 工程方法：契约先行、小步验证](47-engineering-method-context.md)
 - 相关：[48. 工具链与反模式](48-context-toolchain-antipatterns.md)、[49. RAG 的本质](49-rag-essence-selection.md)（检索是「按需取上下文」的通用解法）
-- 平台侧：[../llm/36-streaming-output.md](../llm/36-streaming-output.md)（长输出的工程处理）、[../llm/40-context-optimization.md](../llm/40-context-optimization.md)（上下文优化）
+- 平台侧：[../llm/36-streaming-output.md](../llm/36-streaming-output.md)（长输出的工程处理）、[../llm/15-context-budget.md](../llm/15-context-budget.md)（上下文优化）
 - 总纲：[0-summary.md](0-summary.md)

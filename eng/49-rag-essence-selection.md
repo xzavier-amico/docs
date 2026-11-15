@@ -317,7 +317,7 @@ public List<Chunk> rerank(String query, List<Chunk> candidates, int topK) {
 
 1. 传统搜索的积累（分词、同义词、BM25、rerank、评测）**全部可复用**，不要从零发明。
 2. 但所有参数要重调：`k` 从 10 变成 3~5，排序目标从「用户会点」变成「包含答案」，必须加「拒答」。
-3. Agent 侧多一层：检索本身可能是**工具调用**（模型决定什么时候检索、检索什么），见 `../llm/21-rag-pipeline.md`。
+3. Agent 侧多一层：检索本身可能是**工具调用**（模型决定什么时候检索、检索什么），见 `../llm/20-rag-engineering.md`。
 
 | Agent 特有 | 说明 | 对策 |
 | --- | --- | --- |
@@ -454,6 +454,6 @@ run_eval --config +rewrite.yaml          # 加查询改写
 - 上一章：[48. 工具链与反模式](48-context-toolchain-antipatterns.md)
 - 下一章：[50. 选型方法论与选型矩阵](50-selection-methodology-matrix.md)
 - 相关：[35. 数据模型决定存储](35-storage-model-selection.md)（向量库在存储谱系里的位置）、[39. 多存储下的事务边界](39-multi-storage-transactions.md)（向量与原文一致性）
-- 平台侧：[../llm/21-rag-pipeline.md](../llm/21-rag-pipeline.md)（RAG 在 Agent 平台里的工程实现）、[../llm/24-memory-architecture.md](../llm/24-memory-architecture.md)（记忆 vs 知识库）
+- 平台侧：[../llm/20-rag-engineering.md](../llm/20-rag-engineering.md)（RAG 在 Agent 平台里的工程实现）、[../llm/19-memory-layer.md](../llm/19-memory-layer.md)（记忆 vs 知识库）
 - 论文/文档（以版本为准）：Lewis et al. 2020《Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks》；RRF 原始论文 Cormack et al. 2009；pgvector 官方 README 的 HNSW 参数（`m`、`ef_construction`）
 - 总纲：[0-summary.md](0-summary.md)

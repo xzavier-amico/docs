@@ -328,5 +328,5 @@ Step 4  止血：租户限额 → 模型路由降级 → 关非核心功能 → 
 - 上一章：[50. 选型方法论与选型矩阵](50-selection-methodology-matrix.md)
 - 下一章：[52. 落地清单与反模式集](52-landing-checklist-antipatterns.md)
 - 相关：[17. 限流自身的故障](17-rate-limit-self-failure.md)、[20. 监控指标体系](20-metrics-system.md)、[21. SLO 与告警](21-slo-alerting.md)、[27. 消息排查](27-message-troubleshooting.md)、[33. 卡单与重跑](33-stuck-order-and-rerun.md)、[42. 运维体系](42-ops-system.md)
-- 平台侧：[../llm/38-observability.md](../llm/38-observability.md)（Agent 可观测）、[../llm/41-incident-response.md](../llm/41-incident-response.md)（事故响应）
+- 平台侧：[../llm/39-observability.md](../llm/39-observability.md)（Agent 可观测）、[../llm/39-observability.md](../llm/39-observability.md)（事故与可观测）
 - 总纲：[0-summary.md](0-summary.md)

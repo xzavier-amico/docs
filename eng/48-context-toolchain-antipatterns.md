@@ -262,5 +262,5 @@ static final ArchRule layerRule = layeredArchitecture()
 - 上一章：[47. 工程方法：契约先行、小步验证](47-engineering-method-context.md)
 - 下一章：[49. RAG 的本质与技术谱系](49-rag-essence-selection.md)
 - 相关：[46. 小上下文写大项目](46-small-context-large-project.md)、[52. 落地清单与反模式集](52-landing-checklist-antipatterns.md)
-- 平台侧：[../llm/40-context-optimization.md](../llm/40-context-optimization.md)（上下文预算）、[../llm/16-prompt-as-asset.md](../llm/16-prompt-as-asset.md)（提示词资产化）
+- 平台侧：[../llm/15-context-budget.md](../llm/15-context-budget.md)（上下文预算）、[../llm/16-prompt-as-asset.md](../llm/16-prompt-as-asset.md)（提示词资产化）
 - 总纲：[0-summary.md](0-summary.md)
