@@ -280,7 +280,7 @@
 - [ ] 16 unsafe 与 cgo 的边界
 - [ ] 17 goroutine 源码与栈：`g`、`g0`、栈增长与泄漏本质
 - [ ] 18 GMP 数据结构与 `schedule()` 主循环逐段精读
-- [x] 19 调度时机全景：抢占、syscall、netpoll、sysmon 与 timer
+- [ ] 19 调度时机全景：抢占、syscall、netpoll、sysmon 与 timer
 - [ ] 20 channel 原理与编排模式
 - [ ] 21 select 与超时控制
 - [ ] 22 sync 原语实现
