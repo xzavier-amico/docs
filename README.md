@@ -14,6 +14,7 @@
 - **总纲（先读）**：[`go/0-summary.md`](go/0-summary.md) —— 54 章清单、Java↔Go 对照速查表、阅读路线、里程碑
 - **第一章**：[`go/1-mindset-shift.md`](go/1-mindset-shift.md) —— 心智模型重置（金标准风格样板）
 - **看进度**：`bash go/progress.sh` / `bash llm/progress.sh` / `bash eng/progress.sh`（加 `--all` 看全量）
+- **全仓自检**：`bash check.sh`（断链 / 占位符 / 章节体量与结构 / 状态标记，一条命令跑完；也可 `bash check.sh eng` 只查一套）
 
 ## 从这里开始
 
