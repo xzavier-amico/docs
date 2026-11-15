@@ -174,11 +174,7 @@ again:
 }
 ```
 
-三个要点：
-
-- **选桶用 hash 低位**（`hash & bucketMask(h.B)`），**桶内区分用 hash 高位**（tophash）。两者正交。
-- `t.Hasher` 是编译器生成的函数指针：`string` 走 `runtime.memhash` 系列的汇编实现，整数走 `memhash64` 的特化版本，struct 按其字段拼装。
-- **写操作会"顺手"推进扩容**，这是渐进式的核心：把 O(n) 的搬迁成本平摊到后续的每次读写里。
+三个要点：**选桶用 hash 低位**（`hash & bucketMask(h.B)`），**桶内区分用 hash 高位**（tophash），两者正交；`t.Hasher` 是编译器生成的函数指针（`string` 走 `runtime.memhash` 系列汇编，整数走 `memhash64` 特化，struct 按字段拼装）；**写操作会"顺手"推进扩容**——把 O(n) 的搬迁平摊到后续每次读写。
 
 ### 12.3.4 负载因子 6.5 与渐进式扩容
 
@@ -531,13 +527,7 @@ func (r *Registry) MustRegister(name string, t Tool) {
 
 这个模式在 langchaingo 的 `callbacks` 处理器注册、eino 的组件/工具节点查表、MCP SDK 的 server 端 `tools/list` + `tools/call` 分派里到处都是同一副骨架：**名字 → 实现** 的 map + **稳定顺序**的切片。
 
-**② Agent 场景里 map 的三类用法，坑各不相同：**
-
-| 用法 | 典型代码 | 正确并发策略 |
-| --- | --- | --- |
-| 静态配置/注册表 | `map[string]Tool`、`map[string]Provider` | 启动期写完**不再写**，运行期裸 map |
-| 高频计数（token 账本） | `map[tenantID]int64` 累加 | 分片锁 / `atomic.Int64` 值 / 每 goroutine 本地汇总后合并 |
-| 会话与在途请求 | `map[sessionID]*Session`、`map[jsonrpcID]chan Resp` | `sync.RWMutex` 包住，删除时注意 12.3.7 的不缩容 |
+**② Agent 场景里 map 的三类用法，坑各不相同**：静态注册表（启动期写完、运行期裸 map）、高频计数（token 账本 → 分片锁或 `atomic.Int64`，别用 `map[tenant]int64` 硬扛）、会话/在途请求（`sync.RWMutex` 包住 + 注意不缩容）。
 
 **③ MCP / JSON-RPC 里的经典需求**：请求 id → 等待中的响应 channel。这是"读一次、删一次"的短生命周期 map，必须配 `sync.Mutex` + 超时清理（`defer cleanup()`），否则客户端断连后会留下一堆 `chan` 直到进程结束。**别用裸 map 赌运气，也别用 `sync.Map`——它的语义是"读多写少"，而这里写和删一样频繁。**
 
@@ -551,14 +541,12 @@ func (r *Registry) MustRegister(name string, t Tool) {
 | 2 | `fatal error: concurrent map writes`，`recover` 无效 | map 无内部锁，并发写被检测并直接退出 | `sync.RWMutex` 包住；或分片锁；或每 goroutine 本地 map 后合并 | 12.3.6 |
 | 3 | `assignment to entry in nil map` | `var m map[K]V` 是 nil，只能读不能写 | `make(map[K]V)` / `make(map[K]V, hint)` | 12.3.3 |
 | 4 | 内存单调上涨、删空也不降 | `delete` 不缩容、桶数组不释放 | 定期整体替换 `m = make(...)`；或用 LRU 设容量上限 | 12.3.7 |
-| 5 | 明明是"删了再加"却越来越慢、溢出桶爆 | 碎片化触发 `sameSizeGrow`，反复整理 | 避免"大批删 + 大批加"同一 map；换整体重建 | 12.3.4 |
-| 6 | 大 map 扩容瞬间 RSS 飙 1.5 倍、偶发超时 | 渐进式扩容期间新旧数组共存 | `make(..., hint)` 预分配到位；注意扩容期的内存余量 | 12.3.4 |
-| 7 | `m[k]` 为 `nil`/零值，分不清"不存在" | 缺 comma-ok | `v, ok := m[k]; if !ok {…}` | 12.4 |
-| 8 | 用 slice / 含 slice 的 struct 当 key，编译不过 | key 必须 `comparable` | 改用可比较的身份（id / 序列化后的 string） | 12.4 |
-| 9 | `for k, v := range m { delete(m, k) }` 让人不放心 | 遍历中删除**是**安全的（Go 规范允许） | 但**不要**在遍历中新增键；行为未定义 | 12.3.5 |
-| 10 | `sync.Map` 用了反而更慢 | 只适合"读多写少 + key 集合稳定" | 默认用 `map` + 锁；先 benchmark 再换 | 第 22 章 |
-| 11 | 升级 1.24 后遍历顺序"看起来变了" | Swiss Table 换了随机方式与内存布局 | 本来就不该依赖；顺手全局搜一遍遍历 map 的排序点 | 12.3.8 |
-| 12 | `map` 当 out 参数传进去，函数里重建后调用方没变 | map 值是指针语义，但**重新赋值 header 不可见** | 返回新 map，或传 `*map[K]V` | 第 9 章 |
+| 5 | 大 map 扩容瞬间 RSS 飙 1.5 倍、偶发超时 | 渐进式扩容期间新旧数组共存 | `make(..., hint)` 预分配到位；注意扩容期的内存余量 | 12.3.4 |
+| 6 | `m[k]` 为 `nil`/零值，分不清"不存在" | 缺 comma-ok | `v, ok := m[k]; if !ok {…}` | 12.4 |
+| 7 | 用 slice / 含 slice 的 struct 当 key，编译不过 | key 必须 `comparable` | 改用可比较的身份（id / 序列化后的 string） | 12.4 |
+| 8 | `for k, v := range m { delete(m, k) }` 让人不放心 | 遍历中删除**是**安全的（Go 规范允许） | 但**不要**在遍历中新增键，行为未定义 | 12.3.5 |
+| 9 | 升级 1.24 后遍历顺序"看起来变了" | Swiss Table 换了随机方式与内存布局 | 本来就不该依赖；全局搜一遍遍历 map 的排序点 | 12.3.8 |
+| 10 | `map` 当 out 参数传进去，函数里重建后调用方没变 | map 值是指针语义，但**重新赋值 header 不可见** | 返回新 map，或传 `*map[K]V` | 第 9 章 |
 
 ---
 

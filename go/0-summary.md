@@ -2,6 +2,8 @@
 
 > **一句话**：这本书不教「怎么写出能跑的 Go」，而是把你那颗 JVM 脑袋里的插头拆下来，插进 goroutine 的插座，再一路通电到 LLM Agent 的生产架构里。
 >
+> **✅ 当前状态**：全部 54 章正文已完成（初稿），合计约 **105 万字符 / 16 万字正文 + 740 余个代码块**。
+>
 > **读完之后的状态**：能读懂 `runtime` 源码里的注释；CR 时一眼看出并发缺陷；能自己写出带工具调用 / 流式输出 / 持久化 / 可观测的 Agent 框架；并且清楚每行代码在机器上、在 GC 眼里、在调度器眼里发生了什么。
 
 | 项 | 说明 |
@@ -262,32 +264,32 @@
 
 ## 5. 进度清单
 
-- [ ] 01 从 Java 到 Go：心智模型重置
-- [ ] 02 工程骨架：module、目录布局与工具链
-- [ ] 03 语法极速通道 + 高频陷阱
-- [ ] 04 类型系统：struct、嵌入与方法集
-- [ ] 05 接口的底层：eface / iface / itab
-- [ ] 06 泛型：约束、type set 与实现原理
-- [ ] 07 错误处理哲学：error、wrap、panic 边界
-- [ ] 08 函数、闭包与 defer/panic 实现
-- [ ] 09 零值哲学、指针 vs 值与「可选值」设计
+- [x] 01 从 Java 到 Go：心智模型重置
+- [x] 02 工程骨架：module、目录布局与工具链
+- [x] 03 语法极速通道 + 高频陷阱
+- [x] 04 类型系统：struct、嵌入与方法集
+- [x] 05 接口的底层：eface / iface / itab
+- [x] 06 泛型：约束、type set 与实现原理
+- [x] 07 错误处理哲学：error、wrap、panic 边界
+- [x] 08 函数、闭包与 defer/panic 实现
+- [x] 09 零值哲学、指针 vs 值与「可选值」设计
 - [x] 10 组合优于继承：插件化与注册表设计
 - [x] 11 数组与切片：header、扩容与共享陷阱
-- [ ] 12 map 内部结构与 Go 1.24 Swiss Table
-- [ ] 13 string / []byte / rune 与零拷贝
-- [ ] 14 内存布局、对齐与逃逸分析
-- [ ] 15 内存分配器：mcache / mcentral / mheap
+- [x] 12 map 内部结构与 Go 1.24 Swiss Table
+- [x] 13 string / []byte / rune 与零拷贝
+- [x] 14 内存布局、对齐与逃逸分析
+- [x] 15 内存分配器：mcache / mcentral / mheap
 - [x] 16 unsafe 与 cgo 的边界
-- [ ] 17 goroutine 源码与栈：`g`、`g0`、栈增长与泄漏本质
-- [ ] 18 GMP 数据结构与 `schedule()` 主循环逐段精读
+- [x] 17 goroutine 源码与栈：`g`、`g0`、栈增长与泄漏本质
+- [x] 18 GMP 数据结构与 `schedule()` 主循环逐段精读
 - [x] 19 调度时机全景：抢占、syscall、netpoll、sysmon 与 timer
-- [ ] 20 channel 原理与编排模式
-- [ ] 21 select 与超时控制
-- [ ] 22 sync 原语实现
-- [ ] 23 Go 内存模型与 happens-before（与 JMM 正面对照）
-- [ ] 24 context：取消传播（Agent 的命脉）
-- [ ] 25 并发陷阱：竞态、泄漏、死锁、背压
-- [ ] 26 结构化并发：errgroup、conc 与有界并发
+- [x] 20 channel 原理与编排模式
+- [x] 21 select 与超时控制
+- [x] 22 sync 原语实现
+- [x] 23 Go 内存模型与 happens-before（与 JMM 正面对照）
+- [x] 24 context：取消传播（Agent 的命脉）
+- [x] 25 并发陷阱：竞态、泄漏、死锁、背压
+- [x] 26 结构化并发：errgroup、conc 与有界并发
 - [x] 27 编译链路：AOT 与 JIT 的路线之争
 - [x] 28 GC：三色标记、混合写屏障与调参
 - [x] 29 pprof 与 trace 实战
@@ -300,9 +302,9 @@
 - [x] 36 依赖注入与装配：fx / wire / 手工
 - [x] 37 代码生成与反射：schema 自动化
 - [x] 38 net/http 深潜：Server、中间件与超时
-- [ ] 39 实时通信：SSE / WebSocket / gRPC streaming 怎么选
-- [ ] 40 LLM 客户端：抽象、流式与韧性
-- [ ] 41 工具系统：Function Calling 全链路
+- [x] 39 实时通信：SSE / WebSocket / gRPC streaming 怎么选
+- [x] 40 LLM 客户端：抽象、流式与韧性
+- [x] 41 工具系统：Function Calling 全链路
 - [x] 42 MCP：协议与 Go SDK 实战
 - [x] 43 Agent 循环与编排引擎
 - [x] 44 RAG 管线：从文档到上下文

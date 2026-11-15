@@ -764,7 +764,7 @@ WebSocket 这一点单独处理：连接已经被 hijack，`Shutdown` 管不到�
 - `github.com/coder/websocket` 的 `internal/examples/echo`、`internal/examples/chat`（可以照着抄的完整示例）
 - `github.com/gorilla/websocket` 的 `examples/chat`（经典 hub 模型）
 - grpc-go：`examples/route_guide`、`examples/features/` 下的 streaming 示例
-- 上一章：[38. net/http 深潜：Server、中间件与超时](38-net-http-server.md)
+- 上一章：[38. net/http 深潜：Server、中间件与超时](38-net-http.md)
 - 下一章：[40. LLM 客户端：抽象、流式与韧性](40-llm-client-streaming.md)
 
 ## 交叉引用

@@ -295,7 +295,7 @@ func (s *httpStream) Recv() (*llm.Chunk, error) {
 		}
 		if string(ev.Data) == "[DONE]" { // OpenAI 的结束哨兵，不是 JSON！
 			s.body.Close()
-			return &llm.Chunk{Done: true, Usage: s.usage}, io.EOF
+			return nil, io.EOF // 用 Err()/EOF 表达结束，比塞一个 Done 假 chunk 干净
 		}
 		var raw struct {
 			Choices []struct {
