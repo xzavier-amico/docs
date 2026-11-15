@@ -351,6 +351,11 @@ func (g *Gate) Check(ctx context.Context, slo string, isFixOnly bool) (gateResul
 	return res, nil
 }
 
+// SnapshotStore 由调用方注入（MySQL/ClickHouse 都行）；门禁只关心「写成功没有」
+type SnapshotStore interface {
+	Upsert(ctx context.Context, sloKey string, remaining float64, policy string) error
+}
+
 // 每天 09:00 由调度任务跑一次，把结果写进 release_freeze 表，让所有人看得见
 func (g *Gate) DailySnapshot(ctx context.Context, slos []string, store SnapshotStore) error {
 	for _, s := range slos {

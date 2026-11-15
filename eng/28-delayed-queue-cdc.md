@@ -559,7 +559,6 @@ public class ReconcileJob {
     "table.include.list": "trade.outbox_message,trade.order_info",
     "schema.history.internal.kafka.bootstrap.servers": "broker1:9092,broker2:9092",
     "schema.history.internal.kafka.topic": "cdc.trade.schema-history",
-    "offset.storage.topic": "cdc.connect-offsets",
     "offset.flush.interval.ms": "5000",
     "snapshot.mode": "schema_only",
     "snapshot.lock.timeout.ms": "10000",
@@ -581,13 +580,32 @@ public class ReconcileJob {
 }
 ```
 
+**注意一个高频配错点：`offset.storage.topic` 不是 connector 的配置，是 Kafka Connect worker 的配置。** 写在 connector JSON 里不会报错，也不会生效（被当成未知属性忽略），于是你以为位点存了 Kafka，实际还在容器本地——Pod 一重建就全量重做。必须写在 worker 的 `connect-distributed.properties` 里：
+
+```properties
+# connect-distributed.properties —— worker 级配置（三台 worker 必须完全一致）
+bootstrap.servers=broker1:9092,broker2:9092,broker3:9092
+group.id=cdc-connect-trade
+key.converter=org.apache.kafka.connect.storage.StringConverter
+value.converter=org.apache.kafka.connect.json.JsonConverter
+value.converter.schemas.enable=false
+
+offset.storage.topic=cdc.connect-offsets      # compact；位点（binlog 坐标）存这里
+offset.storage.partitions=25                  # 只在首次创建 topic 时生效
+offset.storage.replication.factor=3
+config.storage.topic=cdc.connect-configs
+status.storage.topic=cdc.connect-status
+offset.flush.interval.ms=5000                 # worker 默认；Debezium connector 可覆盖
+plugin.path=/opt/kafka/plugins
+```
+
 **逐项解释（配置错一个就会在生产上出事）**：
 
 | 配置 | 为什么这么配 | 配错的后果 |
 | --- | --- | --- |
 | `snapshot.mode=schema_only` | 只同步表结构，从**当前位点**开始流式读；Outbox 不需要历史数据 | `initial`：把 outbox 表历史全量重放 → 重复发几百万条消息 |
 | `schema.history.internal.kafka.topic` | DDL 变更历史存 Kafka（compact），connector 重启要读它 | 用文件存储 + 容器重启 → schema 历史丢失，任务起不来 |
-| `offset.storage.topic` | 位点（binlog file + pos / GTID）存 Kafka | 存本地文件 → Pod 重建后位点丢失 → 重新全量 |
+| `offset.storage.topic`（**worker 级**） | 位点（binlog file + pos / GTID）存 Kafka 的 compact topic | 写在 connector 里 = 不生效 → 位点落本地文件 → Pod 重建后全量 |
 | `offset.flush.interval.ms=5000` | 位点刷盘间隔；越小重复越少、开销越大 | 默认 60s → 崩溃后最多重复 60 秒的数据 |
 | `heartbeat.interval.ms=10000` | 无变更时也推进位点，防止「位点长期不动 → binlog 过期」 | 低峰期几小时没写入 → 位点停在旧 binlog，过期后只能重做 |
 | `database.server.id` | 伪装成一个 MySQL replica，必须唯一 | 与真实 replica 冲突 → 主库踢掉从库 |
@@ -607,7 +625,7 @@ public class ReconcileJob {
 
 - **file + pos**：传统坐标，最精确；
 - **GTID**：MySQL 5.6+ 主从切换后仍有效（`pos` 会变，GTID 不变）；
-- connector 每 `offset.flush.interval.ms` 把「最后一条成功发送的事件」的坐标写进 `offset.storage.topic`；
+- connector 每 `offset.flush.interval.ms`（Debezium 默认 60s，我们配 5s）把「最后一条成功发送的事件」的坐标写进 worker 的 `offset.storage.topic`；
 - 重启时从该坐标继续 → **可能重复**（最后一次 flush 之后的事件会重放），所以**下游必须幂等**。
 
 **五个必须知道的坑**（每个都给检测方法）：

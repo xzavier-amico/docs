@@ -297,7 +297,188 @@ Step 4  止血：租户限额 → 模型路由降级 → 关非核心功能 → 
 
 ---
 
-## 51.8 一页速记
+## 51.8 一个完整 case：8 分钟从告警到定位
+
+把上面的卡片串成一次真实排查（已脱敏）。故障：**下单接口 P99 从 200ms 涨到 4.2s，错误率 2%，QPS 无变化**。
+
+### 第 0~2 分钟：确认影响面与四个数
+
+```bash
+# 看四个数（Grafana 看板，或 PromQL）
+# QPS: 5,020（无变化）
+# P99: 4.2s（↑21 倍）
+# 错误率: 2.1%（超时为主）
+# 饱和度: app CPU 42%（不高），DB 连接池 118/120（满）
+```
+
+**第一个判断**：QPS 没变、CPU 不高 → **不是容量问题，是「等待」**。DB 连接池满 → 重点查 DB。
+
+### 第 2~4 分钟：定位到「哪一类查询慢」
+
+```bash
+mysql -e "SELECT id, user, host, db, command, time, state, LEFT(info,100) AS q
+FROM information_schema.processlist
+WHERE command='Query' AND time > 1
+ORDER BY time DESC LIMIT 10;"
+```
+
+输出：
+
+```text
++------+-------+----------------+------+---------+------+------------------+----------------------------------+
+| id   | user  | host           | db   | command | time | state            | q                                |
++------+-------+----------------+------+---------+------+------------------+----------------------------------+
+| 8123 | app   | 10.2.3.11:5321 | shop | Query   |  42  | Sending data     | SELECT ... FROM orders WHERE ...  |
+| 8124 | app   | 10.2.3.11:5322 | shop | Query   |  41  | Sending data     | SELECT ... FROM orders WHERE ...  |
+| 8099 | app   | 10.2.3.12:5310 | shop | Query   |  38  | Sending data     | SELECT ... FROM orders WHERE ...  |
++------+-------+----------------+------+---------+------+------------------+----------------------------------+
+```
+
+**特征**：同一条 SQL、都在 `Sending data`（说明在扫行/回表），42 秒。
+
+### 第 4~6 分钟：看执行计划与索引
+
+```sql
+EXPLAIN SELECT * FROM orders
+WHERE user_id = 88213 AND status = 2 AND created_at >= '2026-09-01'
+ORDER BY created_at DESC LIMIT 20;
+```
+
+```text
++----+-------------+--------+------+------------------+---------+---------+-------+---------+-----------------------------+
+| id | select_type | table  | type | possible_keys    | key     | key_len | rows  | filtered| Extra                       |
++----+-------------+--------+------+------------------+---------+---------+-------+---------+-----------------------------+
+|  1 | SIMPLE      | orders | ref  | idx_user_created | idx_user_created | 8 | 48213 | 10.00   | Using where; Using filesort |
++----+-------------+--------+------+------------------+---------+---------+-------+---------+-----------------------------+
+```
+
+**问题**：走了 `idx_user_created`，但这个用户有 **48,213 行**，还要 `filesort` 排序，并且 `status` 过滤在回表后做。
+
+### 第 6~8 分钟：确认根因 + 止血
+
+```bash
+# 看这个用户最近是不是有大单量（运营活动？）
+mysql -e "SELECT COUNT(*) FROM orders WHERE user_id=88213 AND created_at >= '2026-09-01';"
+# → 48,213（正常用户 < 500）
+```
+
+**根因**：某 B 端客户批量导入 4.8 万订单，导致 `user_id` 维度数据倾斜；该用户的查询回表 4.8 万行 + filesort。
+
+**止血（按优先级）**：
+
+```text
+① 先摘掉慢查询（不影响数据）：
+   KILL 8123; KILL 8124; KILL 8099;
+② 给该租户的「订单列表」加缓存（TTL 60s）或限制时间范围
+③ 加联合索引（低峰执行）：
+   ALTER TABLE orders ADD INDEX idx_user_status_created (user_id, status, created_at);
+④ 长期：大客户查询走独立只读实例 / 或限制单用户导出量
+```
+
+**验证**：
+
+```bash
+# 5 分钟后
+# P99: 210ms ✅  错误率: 0.1% ✅  连接池: 34/120 ✅
+```
+
+**这个 case 的关键动作**：**第 2 分钟就通过「QPS 不变 + CPU 不高 + 连接池满」排除了容量与代码问题**，直接锁定 DB。如果一上来就重启应用，会重启 3 次也找不到原因。
+
+---
+
+## 51.9 命令速查表（贴到跳板机）
+
+### Linux / 进程
+
+```bash
+top -o cpu | head -15                 # CPU 进程
+top -H -p <pid>                       # 线程级 CPU
+pidstat -p <pid> 1 5                  # 进程 CPU/IO
+vmstat 1 5                            # 上下文切换/内存
+iostat -x 1 3                         # 磁盘 IO
+ss -s                                 # 连接统计
+ss -tnp state established | wc -l     # 已建立连接数
+lsof -p <pid> | wc -l                 # 文件句柄
+dmesg -T | tail -50                   # 内核日志（OOM/kill）
+```
+
+### Java
+
+```bash
+jps -l                                             # 进程
+jstack <pid> > /tmp/stack.txt                      # 线程栈（抓 3 次间隔 5s）
+jstack <pid> | grep -A 30 "nid=0x<hex>"            # 按线程查
+jmap -histo:live <pid> | head -30                  # 对象统计
+jmap -dump:live,format=b,file=/tmp/heap.hprof <pid> # 堆转储
+jstat -gcutil <pid> 1000 10                        # GC 频率
+# 火焰图（推荐 async-profiler）
+./profiler.sh -d 30 -f /tmp/flame.html <pid>
+```
+
+### Go
+
+```bash
+kill -QUIT <pid>                                   # 打印全部 goroutine 栈
+curl localhost:6060/debug/pprof/goroutine?debug=2  # goroutine
+curl localhost:6060/debug/pprof/heap > heap.out    # 堆
+go tool pprof -http=:8081 heap.out                 # 可视化
+curl "localhost:6060/debug/pprof/profile?seconds=30" > cpu.out
+go tool pprof -http=:8082 cpu.out
+```
+
+### MySQL
+
+```sql
+SHOW FULL PROCESSLIST;                              -- 当前查询
+SELECT * FROM information_schema.innodb_trx ORDER BY trx_started;  -- 长事务
+SHOW ENGINE INNODB STATUS\G                         -- 死锁/锁等待
+SHOW SLAVE STATUS\G                                 -- 主从延迟
+SELECT * FROM performance_schema.events_statements_summary_by_digest
+ORDER BY SUM_TIMER_WAIT DESC LIMIT 10;              -- 慢 SQL 汇总
+```
+
+### Redis
+
+```bash
+redis-cli --bigkeys
+redis-cli --hotkeys          # 需 maxmemory-policy=allkeys-lfu
+redis-cli INFO stats | grep -E "evicted|expired|keyspace"
+redis-cli SLOWLOG GET 10
+redis-cli CLIENT LIST | awk '{print $2}' | sort | uniq -c | sort -rn | head
+```
+
+### Kafka
+
+```bash
+kafka-consumer-groups.sh --bootstrap-server b:9092 --describe --group <g>   # lag
+kafka-topics.sh --bootstrap-server b:9092 --describe --topic <t>            # 分区/副本
+kafka-run-class.sh kafka.tools.GetOffsetShell --broker-list b:9092 --topic <t> --time -1  # 最新位点
+kafka-console-consumer.sh --bootstrap-server b:9092 --topic <t> --from-beginning --max-messages 5
+```
+
+### K8s
+
+```bash
+kubectl get pods -o wide | grep -v Running
+kubectl describe pod <pod>                 # 事件（OOMKilled/Evicted）
+kubectl logs <pod> --previous              # 上一次崩溃日志
+kubectl top pod --sort-by=cpu | head
+kubectl exec -it <pod> -- sh -c 'ss -s; df -h'
+```
+
+### 网络 / DNS
+
+```bash
+dig +short api.example.com
+curl -w "@curl-format.txt" -o /dev/null -s https://api.example.com/health
+# curl-format.txt: time_namelookup, time_connect, time_starttransfer, time_total
+mtr -rw api.example.com
+tcpdump -i any -nn port 3306 -c 50
+```
+
+---
+
+## 51.10 一页速记
 
 | 关键词 | 必须记住的结论 |
 | --- | --- |
@@ -312,7 +493,7 @@ Step 4  止血：租户限额 → 模型路由降级 → 关非核心功能 → 
 | 双修 | 方法论与命令 100% 复用；Agent 多了「答错也是故障」 |
 | 复盘 | 只看改进项闭环率，不看报告写得多漂亮 |
 
-## 51.9 自检题
+## 51.11 自检题
 
 1. **凌晨 2 点告警：某接口 P99 从 200ms 涨到 2s，QPS 没变。你的前三个动作是什么？**
    > 要点：① 按实例拆 P99，看是否集中在少数实例（是 → 摘除并查该实例 GC/IO）；② 看分段计时，确定是自身还是依赖（DB/Redis/三方）；③ 看连接池等待与线程池队列。不要一上来重启——QPS 没变说明不是容量问题，重启会丢现场且很可能复现。
@@ -323,7 +504,7 @@ Step 4  止血：租户限额 → 模型路由降级 → 关非核心功能 → 
 3. **Agent 平台成本一夜翻 3 倍，但 QPS 只涨了 20%。列出三种排查方向。**
    > 要点：① 按租户/模型拆，看是否单租户刷量或模型路由错（用了贵模型）；② 看 token 结构：输入暴涨（上下文累积/检索 k 变大）还是输出暴涨（循环/啰嗦）；③ 看重试率与失败率（失败重试会成倍放大成本）；④ 看是否有死循环 Run（step 数异常）。止血：租户限额 + 预算熔断 + 路由降级。
 
-## 51.10 延伸阅读
+## 51.12 延伸阅读
 
 - 上一章：[50. 选型方法论与选型矩阵](50-selection-methodology-matrix.md)
 - 下一章：[52. 落地清单与反模式集](52-landing-checklist-antipatterns.md)
