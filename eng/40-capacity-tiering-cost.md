@@ -24,9 +24,10 @@
 
 **总影响 14 分钟、1.2 万单失败、赔付 8.6 万**，而根因极其「不值钱」：
 
-- 订单表 **2 年没有归档**，1.8 亿行，数据 620GB。
-- binlog 保留 **30 天**（默认 7 天，被人改成 30），占用 700GB。
-- 全备每天 1 次，保留 30 份，占用 600GB（还在同一块盘上）。
+- 订单表 **1 年没有归档**，1.8 亿行，数据+索引 59GB，加从库副本共 118GB。
+- binlog 保留 **30 天**（默认 7 天，被人改成 30），大促前后日均 30GB，占用 900GB。
+- 全备每天 1 次，保留 30 份，压缩后 600GB（还在同一块盘上）。
+- 同实例其他库、undo 与临时表空间约 250GB。
 - 磁盘 2TB，实际可用只有 ~1.85TB。
 
 **没有一项是「技术难题」，全是「没算过」。**
@@ -88,18 +89,18 @@ InnoDB 其他：
 ```text
 副本：主 1 + 从 1 = 2 份  ⇒ 数据+索引 ≈ (47+12) × 2 = 118GB
 binlog：每天写入量 ≈ 日订单 50 万 × 0.5KB(含索引变更) ≈ 250MB/天？不对——
-        实际大促日 binlog 20~40GB（含批量更新、索引变更、DDL）
-        保留 30 天 ⇒ 高估 30 × 20GB = 600GB（这就是那次事故的主因）
-全备：47+12 = 59GB/份 × 30 份 = 1.77TB（！！超过了磁盘）
+        实际大促前后日均 30GB（含批量更新、索引变更、DDL）
+        保留 30 天 ⇒ 30 × 30GB = 900GB（这就是那次事故的主因）
+全备：47+12 = 59GB/份，压缩后约 20GB × 30 份 ≈ 600GB（不压缩则 1.77TB，直接顶到磁盘上限）
 ```
 
-> 💡 **这张账算出来，你会立刻发现两个问题**：① 全备保留 30 份根本放不下；② binlog 保留 30 天在写入高峰是灾难。**容量事故往往不是「数据太大」，而是「日志和备份没算」。**
+> 💡 **这张账算出来，你会立刻发现两个问题**：① 全备不压缩根本放不下（1.77TB），压缩后 600GB 也吃掉近三分之一磁盘；② binlog 保留 30 天、日均 30GB，就是 900GB——在写入高峰是灾难。**容量事故往往不是「数据太大」，而是「日志和备份没算」。**
 
 ### 第四步：算增长与水位
 
 ```text
-月增订单 = 日均 50 万 × 30 = 1,500 万行 ≈ 4GB/月（数据+索引+副本）
-年增 ≈ 48GB/年
+月增订单 = 日均 50 万 × 30 = 1,500 万行 ≈ 11GB/月（数据+索引+副本）
+binlog 与全备到保留期后不再净增；规划时按 50GB/月留缓冲，年增约 600GB
 
 磁盘水位线：
   预警 70%（开始规划扩容）
@@ -108,7 +109,7 @@ binlog：每天写入量 ≈ 日订单 50 万 × 0.5KB(含索引变更) ≈ 250M
   
 按 70% 水位反推：可用容量 = 单机磁盘 × 0.7
   若单机 2TB ⇒ 可用 1.4TB
-  当前占用 1.2TB ⇒ 只剩 200GB ≈ 4 个月
+  假设清理后占用 1.2TB ⇒ 只剩 200GB ≈ 4 个月
 ```
 
 ### 一张可复算的表（模板）
@@ -124,6 +125,19 @@ binlog：每天写入量 ≈ 日订单 50 万 × 0.5KB(含索引变更) ≈ 250M
 | 临时/undo | 峰值并发 × 单查询临时空间 | ____ GB |
 | **总需求** | 上列求和 | ____ GB |
 | **年增长** | 月增 × 12 | ____ GB |
+
+### 一个必须会背的算例：1 亿订单 × 500B × 3 副本 × 2 索引
+
+| 步骤 | 算式 | 结果 |
+| --- | --- | --- |
+| 裸数据 | 1×10⁸ × 500B | 50 GB |
+| 二级索引（2 个，合计 +70%） | 50 × 1.7 | 85 GB |
+| 三副本 | 85 × 3 | 255 GB |
+| binlog/undo/临时（+30%） | 255 × 1.3 | 331.5 GB |
+| 2 年增长（年增 41%，1.41²≈2） | 331.5 × 2 | 663 GB |
+| 30% 余量 | 663 × 1.3 | **862 GB ≈ 0.86 TB** |
+
+直觉答案 50GB，实际 0.86TB，差 **17 倍**。如果只按 500GB 买盘，第 14 个月就会写满。**报预算时按这张表报，不要按「行数 × 行宽」报。**
 
 ### 第五步：B+ 树高度（决定点查是 3 次还是 4 次 IO）
 
@@ -215,27 +229,72 @@ LIMIT 5000;
 ```
 
 ```go
-// Go 归档任务：分批 + 限速 + 断点 + 幂等
+// Go 归档任务：先插后删 + 校验 + 断点 + 限速（import "fmt"）
 func (j *ArchiveJob) Run(ctx context.Context) error {
     for {
         var lastID int64
-        err := j.db.QueryRowContext(ctx,
-            `SELECT COALESCE(MAX(order_id),0) FROM archive_checkpoint WHERE job='orders'`).Scan(&lastID)
+        if err := j.db.QueryRowContext(ctx,
+            `SELECT COALESCE(MAX(last_id),0) FROM archive_checkpoint WHERE job='orders'`).Scan(&lastID); err != nil {
+            return err
+        }
+
+        // 1) 先确定本批边界：按主键推进，避免大事务与 OFFSET
+        var batchMax int64
+        err := j.db.QueryRowContext(ctx, `
+            SELECT COALESCE(MAX(order_id),0) FROM (
+                SELECT order_id FROM orders
+                WHERE created_at < NOW() - INTERVAL 90 DAY AND order_id > ?
+                ORDER BY order_id LIMIT 5000
+            ) t`, lastID).Scan(&batchMax)
+        if err != nil { return err }
+        if batchMax == 0 { return nil }
+
+        tx, err := j.db.BeginTx(ctx, nil)
         if err != nil { return err }
 
-        res, err := j.db.ExecContext(ctx, `
+        // 2) 插入归档表
+        if _, err := tx.ExecContext(ctx, `
             INSERT INTO orders_archive
             SELECT * FROM orders
-            WHERE created_at < NOW() - INTERVAL 90 DAY AND order_id > ?
-            ORDER BY order_id LIMIT 5000`, lastID)
-        if err != nil { return err }
-        n, _ := res.RowsAffected()
-        if n == 0 { return nil }
+            WHERE created_at < NOW() - INTERVAL 90 DAY
+              AND order_id > ? AND order_id <= ?`, lastID, batchMax); err != nil {
+            tx.Rollback(); return err
+        }
 
-        if _, err := j.db.ExecContext(ctx,
-            `INSERT INTO archive_checkpoint(job,last_id) VALUES('orders',?)
-             ON DUPLICATE KEY UPDATE last_id=VALUES(last_id)`,
-            lastID+int64(n)); err != nil { return err }
+        // 3) 校验本批行数：src == dst 才允许删
+        var srcCnt, dstCnt int
+        if err := tx.QueryRowContext(ctx, `
+            SELECT COUNT(*) FROM orders
+            WHERE created_at < NOW() - INTERVAL 90 DAY
+              AND order_id > ? AND order_id <= ?`, lastID, batchMax).Scan(&srcCnt); err != nil {
+            tx.Rollback(); return err
+        }
+        if err := tx.QueryRowContext(ctx, `
+            SELECT COUNT(*) FROM orders_archive
+            WHERE created_at < NOW() - INTERVAL 90 DAY
+              AND order_id > ? AND order_id <= ?`, lastID, batchMax).Scan(&dstCnt); err != nil {
+            tx.Rollback(); return err
+        }
+        if srcCnt != dstCnt {
+            tx.Rollback()
+            return fmt.Errorf("archive count mismatch: src=%d dst=%d", srcCnt, dstCnt)
+        }
+
+        // 4) 再删源表
+        if _, err := tx.ExecContext(ctx, `
+            DELETE FROM orders
+            WHERE created_at < NOW() - INTERVAL 90 DAY
+              AND order_id > ? AND order_id <= ?`, lastID, batchMax); err != nil {
+            tx.Rollback(); return err
+        }
+
+        // 5) 断点必须是本批最大主键，不能写 lastID + 行数
+        if _, err := tx.ExecContext(ctx, `
+            INSERT INTO archive_checkpoint(job,last_id) VALUES('orders',?)
+            ON DUPLICATE KEY UPDATE last_id=VALUES(last_id)`, batchMax); err != nil {
+            tx.Rollback(); return err
+        }
+        if err := tx.Commit(); err != nil { return err }
 
         time.Sleep(200 * time.Millisecond)   // 限速，保护主库
     }

@@ -54,6 +54,8 @@ pats = [
     (r"写作时填充", "骨架残留"),
     (r"本章计划小节", "骨架残留"),
     (r"<!--\s*CHUNK\d", "分块占位符"),
+    (r"<!--\s*CH\d+-CONT\s*-->", "章节未写完"),
+    (r"<!--\s*CONT\s*-->", "章节未写完"),
     (r"TODO:", "TODO:"),
     (r"\bTBD\b", "TBD"),
     (r"（待补）|待补充|此处省略", "待补"),
@@ -82,7 +84,7 @@ echo "═══ 3. 章节体量与结构 ═══"
 python3 - "${SERIES[@]}" <<'PY'
 import os, re, sys
 series = sys.argv[1:]
-THIN = 2500
+THIN = 11000
 for s in series:
     if not os.path.isdir(s):
         continue

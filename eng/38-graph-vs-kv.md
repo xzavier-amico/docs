@@ -127,7 +127,7 @@ WHERE dept_id IN (SELECT dept_id FROM dept_tree)
 ### 方案 A：关系型 + 递归 CTE（1~3 跳首选）
 
 ```sql
--- 完整可跑：组织树 + 权限判定（PostgreSQL 语法，MySQL 8 需把 UNION ALL 改成 UNION 兼容写法）
+-- 完整可跑：组织树 + 权限判定（PostgreSQL 语法；MySQL 8 同样支持 WITH RECURSIVE 与 UNION ALL）
 CREATE TABLE dept (
     dept_id    BIGINT PRIMARY KEY,
     parent_id  BIGINT REFERENCES dept(dept_id),
@@ -276,6 +276,8 @@ WHERE a.subject_type = 'DEPT'
 - 「文章-标签」多对多（中间表就够）
 - 只有几万条数据的配置关系
 - 团队没人会 Cypher，出问题只能重启
+
+**判断顺序不能反**：先算「核心查询几跳、每跳扇出多少」，再算「需不需要返回路径」，然后看「数据量与变更频率」，最后才看「团队会不会 Cypher」。前三项有一项不成立，图就不是刚需；第四项不成立，就算刚需也会被运维成事故。
 
 > 🩸 **反模式**：为了「技术先进」上图，结果 90% 的查询还是 `MATCH (n {id:$id}) RETURN n`——这种点查在 MySQL 里是 0.2ms，在图库里是 2ms，还多了一套运维。
 

@@ -119,7 +119,7 @@ CREATE TABLE device_metric (
   metric     text,
   value      double,
   PRIMARY KEY ((device_id, bucket), ts, metric)
-) WITH CLUSTERING ORDER BY (ts DESC)
+) WITH CLUSTERING ORDER BY (ts DESC, metric ASC)
   AND compaction = {
     'class': 'TimeWindowCompactionStrategy',
     'compaction_window_size': '1',

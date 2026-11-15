@@ -2,7 +2,7 @@
 
 > **状态**：`已完成（初稿）` ｜ **所属**：第五部分 · 编排与状态机 ｜ **编号**：30 / 52
 > **本章定位**：第 29 章回答了「谁拥有下一步的决定权」，本章回答「这个决定怎么变成一条不可争议的数据库记录」。五要素是语法，三种落库姿势是存储结构，并发迁移和迁移 trace 是让它经得起生产的两条腿。
-> **读法**：§30.2 的形式化定义值得逐字读；§30.4 先看三种姿势的对比表再选型；§30.7 的 200 并发测试可以直接搬进 CI。
+> **读法**：§30.2 的形式化定义值得逐字读；§30.4 先看三种姿势的对比表再选型；§30.4.4 的 200 并发测试可以直接搬进 CI。
 
 ---
 
@@ -311,6 +311,37 @@ public TransitionPlan plan(String machine, int version, String from,
 }
 ```
 
+定义表的作者态用 YAML 维护，发布时写入 `sm_definition` / `sm_transition`：
+
+```yaml
+# order-state-machine.yaml
+machine: order
+version: 3
+initial: CREATED
+terminal: [REFUNDED, CANCELLED, CLOSED]
+transitions:
+  - from: CREATED
+    event: PAY_SUBMITTED
+    to: PAYING
+    guard: "amount > 0 && stockLocked"
+    action: create_payment
+  - from: PAYING
+    event: PAY_CONFIRMED
+    to: PAID
+    guard: "paymentNo != null && paidAmount == amount"
+    action: post_payment
+  - from: PAID
+    event: REFUND_REQUESTED
+    to: REFUNDING
+    guard: "refundAmount <= paidAmount"
+    action: create_refund
+  - from: REFUNDING
+    event: REFUND_SUCCEEDED
+    to: REFUNDED
+    guard: "ledgerOk"
+    action: post_refund
+```
+
 **并发分析**：定义表是只读缓存，实例迁移仍走 ① 的条件更新。真正要小心的是**定义版本漂移**：实例创建时绑定 `definition_version`，升级只对新建实例生效；否则一次配置变更会让 3 万个在途实例集体非法。
 
 ### 并发迁移：乐观锁 + `WHERE status IN (...)`
@@ -344,7 +375,7 @@ public Result payConfirmed(long id, int seenVersion) {
 }
 ```
 
-> ⚠️ **`IN` 的陷阱**：如果 `PAY_CONFIRMED` 和 `CANCEL` 都允许从 `PAYING` 出发，那么「先支付成功、再取消成功」会连续发生，两个都合法。这不是并发 bug，是**业务规则缺失**。解法是给取消加守卫「未收到支付成功回调」，或者把两个事件收敛成一个「支付结果裁决」事件，由同一个决策者按优先级处理。
+> ⚠️ **`IN` 的陷阱**：如果 `PAY_CONFIRMED` 和 `CANCEL` 都允许从 `PAYING` 出发，那么「先支付成功、再取消成功」会连续发生，两个都合法。这不是并发 bug，是**规则缺失**。解法是给取消加守卫「未收到支付成功回调」，或者把两个事件收敛成一个「支付结果裁决」事件，由同一个决策者按优先级处理。
 
 ### 200 并发测试（Java，可直接进 CI）
 
@@ -512,7 +543,7 @@ CREATE TABLE state_transition_log (
 
 ---
 
-## 30.10 怎么验证：四类测试 + 三个指标
+## 30.10 怎么验证：六类测试 + 四个指标
 
 | 验证项 | 方法 | 通过标准 |
 | --- | --- | --- |

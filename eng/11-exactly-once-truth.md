@@ -80,7 +80,7 @@ T5  commit offset=101                     ← 位点已推进
 
 崩溃点分析：
   T4 之后、T5 之前崩溃 → 位点仍是 100 → 重投 → 业务已生效 → 重复（至少一次）
-  T5 之后、T4 之前崩溃 → 位点已到 101 → 不重投 → 业务没生效 → 丢（至多一次）
+  若代码改成先 T5 后 T4：T5 之后、T4 之前崩溃 → 位点已到 101 → 不重投 → 业务没生效 → 丢（至多一次）
   T2~T4 之间崩溃       → DB 回滚 + 位点未提交 → 重投 → 安全（前提是幂等）
 
 结论：T4 和 T5 无法在同一个原子事务里（跨 DB 与 Kafka），
@@ -123,7 +123,6 @@ while (running) {
 
 // ✅ 至少一次：先处理（幂等），再提交位点。崩溃 → 重投 → 幂等挡住
 consumer.subscribe(List.of("user-registered"));
-consumer.poll(Duration.ZERO);               // 触发 rebalance
 while (running) {
     ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(500));
     for (ConsumerRecord<String, String> r : records) {
@@ -177,7 +176,8 @@ CREATE TABLE consume_idempotency (
   consumer_group VARCHAR(128)    NOT NULL COMMENT '消费组/处理器',
   event_id       VARCHAR(128)    NOT NULL COMMENT '消息唯一 ID',
   biz_key        VARCHAR(128)    NULL COMMENT '业务键，便于排查',
-  status         ENUM('DONE','FAILED') NOT NULL DEFAULT 'DONE',
+  status         ENUM('PROCESSING','DONE','FAILED') NOT NULL DEFAULT 'DONE',
+  lease_until    DATETIME(3)     NULL COMMENT '外部副作用处理中的租约',
   result         JSON            NULL COMMENT '可选的返回摘要',
   created_at     DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   updated_at     DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
@@ -276,6 +276,12 @@ Agent 侧要额外做的三件事：
 ```go
 // Agent Step 消费：先查模型缓存，再执行工具；Step 结果与幂等记录同事务
 func (h *StepHandler) Handle(ctx context.Context, evt StepEvent) error {
+	// 先查 Step 是否已完成，避免重复 Step 再次调用模型
+	if done, err := h.idem.IsDone(ctx, evt.ConsumerGroup, evt.StepID); err != nil {
+		return err
+	} else if done {
+		return nil
+	}
 	if cached, ok := h.llmCache.Get(evt.ModelKey()); ok {
 		evt.Result = cached                       // 重放不重复调用模型
 	} else {
@@ -284,9 +290,13 @@ func (h *StepHandler) Handle(ctx context.Context, evt StepEvent) error {
 		h.llmCache.Set(evt.ModelKey(), resp, 24*time.Hour)
 		evt.Result = resp
 	}
+	// 并发重试仍可能各调用一次模型：缓存 + token 对账兜底，DB 副作用靠唯一键收敛
 	return h.repo.InTx(ctx, func(tx *sql.Tx) error {
 		if err := h.idem.Insert(tx, evt.ConsumerGroup, evt.StepID); err != nil {
-			return nil                            // 已处理，幂等返回
+			if errors.Is(err, ErrDuplicateKey) {
+				return nil                        // 已处理，幂等返回
+			}
+			return err                            // 不能把连接失败当成「已处理」
 		}
 		if err := h.repo.SaveStepResult(tx, evt); err != nil { return err }
 		return h.outbox.Insert(tx, evt.ToCompletedEvent())

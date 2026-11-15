@@ -2,7 +2,7 @@
 
 > **状态**：`已完成（初稿）` ｜ **所属**：第二部分 · 事务与一致性 ｜ **编号**：9 / 52
 > **本章定位**：选型不是「哪个方案先进」，而是「哪条约束先把你逼到墙角」。这一章给你一棵能走完的决策树、一张判定表、四个真实场景的完整选型，以及四种最常见的选型反模式。
-> **读法**：先看 §9.3 的树，再用 §9.4 的四个场景对号入座；§9.5 的反模式清单建议直接放进架构评审 checklist。
+> **读法**：先看 §9.3 的树，再用 §9.4 的四个场景对号入座；§9.6 的反模式清单建议直接放进架构评审 checklist。
 
 ---
 
@@ -160,11 +160,12 @@ CREATE TABLE stock_reservation (
 CREATE TABLE ledger_entry (
   id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   biz_no       VARCHAR(64)     NOT NULL COMMENT '支付单号/退款单号',
-  entry_no     INT             NOT NULL COMMENT '同一 biz_no 下的分录序号',
+  entry_no     VARCHAR(64)     NOT NULL COMMENT '分录号；冲正可用 REV...',
   account_id   BIGINT UNSIGNED NOT NULL,
   direction    ENUM('DEBIT','CREDIT') NOT NULL,
   amount       DECIMAL(18,2)   NOT NULL,
   currency     CHAR(3)         NOT NULL DEFAULT 'CNY',
+  remark       VARCHAR(128)    NULL,
   created_at   DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   PRIMARY KEY (id),
   UNIQUE KEY uk_biz_entry (biz_no, entry_no),
@@ -237,6 +238,7 @@ public Product get(long id) {
     Product cached = redis.get("product:" + id);
     if (cached != null) return cached;
     Product db = productMapper.selectById(id);
+    // setIfVersionGreater 为自研封装：Lua 比较版本后再写，避免旧值覆盖新值
     redis.setIfVersionGreater("product:" + id, db, db.getVersion(), Duration.ofMinutes(10));
     return db;
 }

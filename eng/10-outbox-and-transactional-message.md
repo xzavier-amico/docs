@@ -151,7 +151,7 @@ public void createOrder(OrderCmd cmd) {
         .eventId(eventId)
         .aggregateType("order")
         .aggregateId(order.getOrderNo())
-        .aggregateVersion(1L)
+        .aggregateVersion(1L)                        // 首次事件；同一聚合后续事件 +1
         .eventType("order.created")
         .payload(Json.toJson(Map.of(
             "schema_version", 2,
@@ -233,6 +233,8 @@ database.server.id: 184054
 topic.prefix: prod
 database.include.list: order_db
 table.include.list: order_db.outbox_event
+schema.history.internal.kafka.bootstrap.servers: kafka:9092
+schema.history.internal.kafka.topic: schema-changes.order_db
 transforms: outbox
 transforms.outbox.type: io.debezium.transforms.outbox.EventRouter
 transforms.outbox.route.by.field: aggregate_type
@@ -258,7 +260,7 @@ transforms.outbox.table.fields.additional.placement: event_type:header:eventType
 适合：已经用 RocketMQ、希望由 MQ 承担「半消息 + 回查」、不想维护 relay。
 
 ```java
-// Spring RocketMQ 5.x：本地事务 + 半消息 + Broker 回查
+// Spring RocketMQ（rocketmq-spring-boot-starter 2.x）：本地事务 + 半消息 + Broker 回查
 @RocketMQTransactionListener
 public class OrderTxListener implements RocketMQLocalTransactionListener {
 
@@ -372,15 +374,26 @@ UPDATE orders
 | 分区（可选） | 按 `created_at` RANGE 分区，直接 DROP PARTITION | 唯一键需包含分区键，DDL 要提前设计 |
 
 ```sql
--- 归档 + 删除：先归档，再按主键批量删；可重复执行、可断点续跑
-INSERT INTO outbox_archive
-SELECT * FROM outbox_event
- WHERE status='SENT' AND created_at < NOW() - INTERVAL 7 DAY
- ORDER BY id LIMIT 1000;
+-- 归档 + 删除：同一事务内先锁定同一批 id，避免归档与删除之间状态变化
+START TRANSACTION;
 
-DELETE FROM outbox_event
+CREATE TEMPORARY TABLE IF NOT EXISTS tmp_outbox_ids (
+  id BIGINT UNSIGNED NOT NULL PRIMARY KEY
+);
+DELETE FROM tmp_outbox_ids;
+
+INSERT INTO tmp_outbox_ids
+SELECT id FROM outbox_event
  WHERE status='SENT' AND created_at < NOW() - INTERVAL 7 DAY
- ORDER BY id LIMIT 1000;
+ ORDER BY id LIMIT 1000
+ FOR UPDATE;
+
+INSERT INTO outbox_archive
+SELECT o.* FROM outbox_event o JOIN tmp_outbox_ids t ON t.id = o.id;
+
+DELETE o FROM outbox_event o JOIN tmp_outbox_ids t ON t.id = o.id;
+
+COMMIT;
 ```
 
 ```yaml

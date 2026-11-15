@@ -373,8 +373,8 @@ SELECT b.biz_no,
 type DiffRow struct {
 	BizNo         string
 	DiffType      string
-	BizAmount     sql.NullFloat64
-	ChannelAmount sql.NullFloat64
+	BizAmount     sql.NullString // SQL 里 toString(amount)，避免 Decimal 扫描类型差异
+	ChannelAmount sql.NullString
 	BizStatus     sql.NullString
 	ChannelStatus sql.NullString
 }

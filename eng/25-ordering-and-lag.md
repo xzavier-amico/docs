@@ -290,7 +290,7 @@ func (h *Handler) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.Co
 
 | # | 现象 | 根因 | 怎么查 | 怎么修 | 怎么防复发 |
 | --- | --- | --- | --- | --- | --- |
-| 1 | 已取消订单又发货 | listener 内 `@Async`/线程池，执行顺序错乱 | 比对 offset 与 `updated_at` | 去掉内部线程池，改同步处理 | Code review 禁止 listener 内 `@Async` |
+| 1 | 已取消订单又发货 | listener 内 `@Async`/线程池，执行顺序错乱 | 比对 offset 与 `updated_at` | 去掉线程池，改同步 | Code review 禁止 listener 内 `@Async` |
 | 2 | 扩分区后大量状态回退 | key→分区映射改变，旧 key 的历史消息在新分区 | 对齐扩分区时间 | 扩分区选低峰；迁移窗口内按 key 串行；状态机加版本号 | 关键 Topic 一次预留足够分区 |
 | 3 | 重试消息把状态改回旧值 | 重试 Topic 绕过原分区，迟到的旧消息覆盖新状态 | 查重试消费时间与版本号 | 条件更新 `WHERE version < ?`；同 key 阻塞 | 所有状态更新带版本号 |
 | 4 | 扩容后 lag 不降 | 实例数 > 分区数，多出的实例空转 | `--describe` 看成员数与分区数 | 实例数 ≤ 分区数；或扩分区 | 容量模型写进告警：实例数/分区数 |

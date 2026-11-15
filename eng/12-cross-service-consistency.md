@@ -2,7 +2,7 @@
 
 > **状态**：`已完成（初稿）` ｜ **所属**：第二部分 · 事务与一致性 ｜ **编号**：12 / 52
 > **本章定位**：用一条真实的订单-库存-支付链路，把「Saga 编排」和「事件协同」两套实现完整写出来，再用三次事故说明它们各自会在哪炸。补偿不是回滚，这一章把「可重复、可逆、可审计」落到表结构和代码上。
-> **读法**：§12.1 的三次事故先对号入座；§12.4 两套实现选一套精读；§12.4.5 的对比表是架构评审时最有用的部分。
+> **读法**：§12.1 的三次事故先对号入座；§12.4 两套实现选一套精读；§12.4.3 的对比表是架构评审时最有用的部分。
 
 ---
 
@@ -138,7 +138,7 @@ CREATE TABLE saga_step (
   status        ENUM('PENDING','DONE','FAILED','COMPENSATED','COMPENSATION_FAILED') NOT NULL,
   request       JSON            NULL,
   response      JSON            NULL,
-  compensation_id VARCHAR(64)   NULL COMMENT '补偿幂等键',
+  compensation_id VARCHAR(192)  NULL COMMENT '补偿幂等键',
   retry_count   INT             NOT NULL DEFAULT 0,
   last_error    VARCHAR(512)    NULL,
   created_at    DATETIME(3)     NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
@@ -167,8 +167,9 @@ public class OrderSagaOrchestrator {
     }
 
     public void run(String sagaId) {
-        SagaInstance saga = instanceMapper.getForUpdate(sagaId);
-        if (saga.getStatus() != RUNNING) return;        // 已被其它线程推进
+        // 短事务认领：UPDATE ... WHERE saga_id=? AND status='RUNNING' AND next_retry_at<=NOW(3)
+        // 不要把数据库事务跨在远程调用上，否则又变成「XA 式长事务」
+        if (!instanceMapper.tryClaim(sagaId)) return;
         try {
             step(sagaId, "createOrder", 1, () -> orderClient.create(sagaId));
             step(sagaId, "reserveStock", 2, () -> stockClient.reserve(sagaId));
@@ -181,7 +182,10 @@ public class OrderSagaOrchestrator {
         }
     }
 
-    private void step(String sagaId, String name, int order, Runnable action) {
+    @FunctionalInterface
+    interface StepAction { void run() throws Exception; }
+
+    private void step(String sagaId, String name, int order, StepAction action) throws Exception {
         SagaStep existing = stepMapper.find(sagaId, name);
         if (existing != null && existing.getStatus() == DONE) return; // 重放不重复执行
         stepMapper.insertIgnore(sagaId, name, order, "PENDING");
@@ -225,6 +229,7 @@ public class OrderSagaOrchestrator {
 - 补偿逆序执行，`compensation_id` 固定（`sagaId:step:cancel`），下游用它做幂等。
 - 补偿失败**不能吞**：状态置 `COMPENSATION_FAILED`，流程转 `MANUAL`，告警 + 人工工单。
 - 编排器自身要能恢复：定时扫描 `RUNNING`/`COMPENSATING` 且 `updated_at` 超时的实例，重新 `run`/`compensate`。
+- `tryClaim` 必须是短事务的条件更新（`WHERE status='RUNNING' AND next_retry_at<=NOW(3)`），**不能在整个 `run` 外面包一个大事务**——那会把远程调用锁进数据库事务，退化成 XA。
 
 ### 12.4.2 协同版：各服务订阅事件
 
@@ -247,12 +252,19 @@ func (h *StockHandler) Handle(ctx context.Context, evt Event) error {
 
 func (h *StockHandler) reserve(ctx context.Context, evt Event) error {
 	return h.repo.InTx(ctx, func(tx *sql.Tx) error {
-		// 幂等：同一 order_no 只预留一次
-		if ok, _ := h.repo.Exists(tx, evt.OrderNo); ok { return nil }
+		// 示例按单 SKU 订单；多 SKU 用 order_no + sku_id 做幂等键
+		if ok, _ := h.repo.Exists(tx, evt.OrderNo, evt.SkuID); ok { return nil }
 		if err := h.repo.Freeze(tx, evt.OrderNo, evt.SkuID, evt.Qty); err != nil {
+			if errors.Is(err, ErrInsufficientStock) {
+				// 业务失败也要留事件，让订单服务走补偿/取消；不能只返回错误
+				return h.outbox.Insert(tx, Event{
+					EventID: evt.OrderNo + ":stock.reserve_failed", AggregateID: evt.OrderNo,
+					Type: "stock.reserve_failed",
+					Payload: map[string]any{"sku_id": evt.SkuID, "qty": evt.Qty},
+				})
+			}
 			return err
 		}
-		// 预留成功/失败都发事件；失败让订单服务补偿
 		return h.outbox.Insert(tx, Event{
 			EventID: evt.OrderNo + ":stock.reserved", AggregateID: evt.OrderNo,
 			Type: "stock.reserved", Payload: map[string]any{"sku_id": evt.SkuID, "qty": evt.Qty},
@@ -299,7 +311,7 @@ UPDATE orders
 ```sql
 CREATE TABLE compensation_record (
   id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  compensation_id VARCHAR(128)    NOT NULL COMMENT 'sagaId:step:cancel',
+  compensation_id VARCHAR(192)    NOT NULL COMMENT 'sagaId:step:cancel',
   saga_id         VARCHAR(64)     NOT NULL,
   step_name       VARCHAR(64)     NOT NULL,
   action          VARCHAR(64)     NOT NULL COMMENT 'REFUND/RELEASE/REVERSE',

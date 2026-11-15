@@ -26,7 +26,7 @@
 
 **事故三：补偿失败，3,400 笔退款重试 6 小时（2025-05-16）**
 
-退款 Saga 的补偿调用渠道退款接口，渠道超时。补偿 worker 每秒重试一次，没有上限、没有退避。
+退款 Saga 的补偿调用渠道退款接口，渠道超时。补偿 worker 的 16 个线程每秒各重试一次，没有上限、没有退避。
 
 - 6 小时发出 **34 万次**重试请求，渠道把商户号限流，正常退款也失败。
 - 3,400 笔退款积压 11 天，人工逐笔处理，赔付 **47 万元**。
@@ -58,6 +58,8 @@
 - **状态机定律**：每个分支必须有 `TRYING/TRIED/CONFIRMED/CANCELLED/CANCEL_FAILED` 状态；没有状态就无法判断「谁来晚了」。
 - **稀缺资源定律**：TCC 锁的是预留额度；悬挂会让额度永久占用，空回滚会让额度被重复占用。
 - **不可回滚定律**：Cancel 不是「撤销 Try」，是「释放预留/退款/退库存」的新事实；它本身也可能失败。
+
+**三坑不是三个独立 bug，而是一条因果链**：空回滚是「Cancel 没留墓碑」，悬挂是「Try 没看墓碑」，两者是同一个状态缺失的两面；补偿失败则是另一条正交的故障线——即使顺序完全正确，Cancel 也可能因为下游超时/拒绝而失败。所以修复顺序必须是：**先补状态（墓碑 + 防悬挂标记），再修数据（释放悬挂资源），最后补补偿重试与人工兜底**。反过来先修数据，晚到的 Try 会把刚修好的资源再占一次。
 
 ---
 
@@ -195,13 +197,15 @@ public class SagaBranchService {
     /** Cancel：无论 Try 是否来过，都留下 CANCELLED 墓碑 */
     @Transactional(rollbackFor = Exception.class)
     public boolean cancel(String xid, String branchId, String reason) {
-        branchMapper.insertCancelTombstone(xid, branchId, reason);  // status=CANCELLED, cancel_flag=1
+        // 不存在则插 CANCELLED 墓碑；已存在只打 cancel_flag，不改写 TRIED
+        branchMapper.insertCancelTombstone(xid, branchId, reason);
         SagaBranch b = branchMapper.selectForUpdate(xid, branchId);
         if (b == null) return true;
         if ("CONFIRMED".equals(b.getStatus())) {
             branchMapper.markManual(xid, branchId, "cancel after confirm");
             return false;                                           // 协议冲突，人工处理
         }
+        if ("MANUAL".equals(b.getStatus())) return false;           // 人工已接管，不自动清状态
         if ("CANCELLED".equals(b.getStatus())) return true;         // 幂等
         try {
             reservationMapper.release(xid);                         // 释放预留，幂等
@@ -223,13 +227,12 @@ INSERT INTO saga_branch(xid, branch_id, biz_no, status, try_time)
 VALUES (?, ?, ?, 'TRYING', NOW(3))
 ON DUPLICATE KEY UPDATE id = id;
 
--- Cancel：不存在就插入墓碑；已存在则打标记，TRIED → CANCELLED
+-- Cancel：不存在就插入墓碑；已存在只打标记，保留 TRIED 让 Cancel 先释放资源
 INSERT INTO saga_branch(xid, branch_id, biz_no, status, cancel_flag, cancel_time)
 VALUES (?, ?, ?, 'CANCELLED', 1, NOW(3))
 ON DUPLICATE KEY UPDATE
   cancel_flag = 1,
-  cancel_time = IF(cancel_time IS NULL, NOW(3), cancel_time),
-  status = IF(status = 'TRIED', 'CANCELLED', status);
+  cancel_time = IF(cancel_time IS NULL, NOW(3), cancel_time);
 
 -- Confirm：只有 TRIED 且未 Cancel 才能确认
 UPDATE saga_branch
@@ -245,9 +248,14 @@ UPDATE stock_reservation
 ### 13.4.3 Go：补偿重试 worker（上限 + 退避 + 人工）
 
 ```go
+// CancelService 是 Go 侧对补偿能力的抽象；Java 实现可走 RPC，也可用 Go 重写同一状态机
+type CancelService interface {
+	Cancel(ctx context.Context, xid, branchID, reason string) error
+}
+
 type CompWorker struct {
 	Repo     BranchRepo
-	Service  *SagaBranchService
+	Service  CancelService
 	MaxRetry int
 }
 
@@ -362,6 +370,8 @@ ON DUPLICATE KEY UPDATE reason=VALUES(reason);
 
 > ⚠️ 修复 SQL 必须先 `SELECT` 确认影响行数，再在事务里执行；生产上先 `dry-run`（把 `UPDATE` 改成 `SELECT`），确认只命中预期数据。**不要直接跑 `UPDATE ... JOIN` 不看执行计划。**
 
+**修复顺序（重要）**：先停掉相关补偿 worker 和正向重试，避免边修边写；再按「空回滚 → 悬挂 → 补偿失败」逐类查；每类都先修 `saga_branch` 状态、再修资源表、最后重放/对账。修完必须跑一遍第 14 章的对账 SQL，确认「资源表、分支表、业务表」三方一致，否则只是把问题藏起来了。
+
 ---
 
 ## 13.5 双修对照：Agent 工具的「三坑」更难逆
@@ -385,6 +395,8 @@ Agent 侧的三条额外纪律：
 2. **不可逆工具先审批/dry-run**：发邮件、发短信、删文件、调第三方下单，补偿往往不可行；执行前必须有人确认或至少记录「不可逆」标记。
 3. **补偿失败要告诉用户**：传统系统补偿失败进工单；Agent 还要给用户一个明确的「哪些操作没撤销成功」的说明，不能假装完成。
 
+**最麻烦的是「不可逆工具」**：邮件已发、消息已推送、第三方订单已受理，这些没有真正的 Cancel，只有「发更正/道歉/人工协商」。对这类工具，正确做法不是写一个假补偿，而是：执行前审批（或 dry-run）、执行后记录不可逆标记、失败时进人工队列并在 Run 结果里明确标注「未撤销」。**把不可逆说成已回滚，比补偿失败本身更严重。**
+
 ```go
 // Agent Step：调用工具前检查取消标记；调用后落结果 + 补偿信息
 func (e *Executor) CallTool(ctx context.Context, step Step) (Result, error) {
@@ -395,6 +407,7 @@ func (e *Executor) CallTool(ctx context.Context, step Step) (Result, error) {
 	if err != nil { return Result{}, err }
 	if err := e.repo.SaveToolResult(ctx, step.StepID, res); err != nil {
 		// 工具已执行但结果没落库：标记「可能已执行」，恢复时先查询/补偿
+		_ = e.repo.MarkMaybeExecuted(ctx, step.StepID, err.Error())
 		return Result{}, fmt.Errorf("save tool result: %w", err)
 	}
 	return res, nil

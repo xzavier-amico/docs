@@ -49,7 +49,7 @@ MySQL（商品主数据）  →  Redis（详情缓存，TTL 10 分钟）  →  E
 | **写成功一半** | DB 成功、Redis 失败 | 缓存脏，读到旧值 | 删缓存失败被吞；网络抖动 |
 | **顺序错** | 先删缓存、后写库 | 并发读把旧值回填 | 经典 cache-aside 竞态 |
 | **重试重复** | 同一次写被重试两次 | 计数翻倍、消息重复 | 无幂等 |
-| **延迟回写** | 旧值晚到 | 新值被覆盖 | 无版本号；异步复制乱序 |
+| **缓存脏（延迟回写）** | 旧值回填 / 旧值晚到 | 读到旧值，新值被覆盖 | 删缓存失败后回填；无版本号；异步复制乱序 |
 
 ### 一致性等级表（写进设计文档，别口头说「最终一致」）
 
@@ -221,6 +221,7 @@ return 0
 -- Outbox 表（与业务表同库，同事务）
 CREATE TABLE outbox (
     id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+    aggregate_type VARCHAR(64) NOT NULL,          -- 路由用：product/order/...
     aggregate_id  BIGINT NOT NULL,
     event_type    VARCHAR(64) NOT NULL,
     payload       JSON NOT NULL,
@@ -239,8 +240,8 @@ CREATE TABLE outbox (
 @Transactional
 public void updateProduct(Product p) {
     productRepo.update(p);                                   // 业务表
-    outboxRepo.insert(Outbox.of(p.getId(), "PRODUCT_UPDATED",
-                                toJson(p), p.getVersion())); // outbox
+    outboxRepo.insert(Outbox.of("product", p.getId(),        // 第一参 = aggregate_type
+                                "PRODUCT_UPDATED", toJson(p), p.getVersion())); // outbox
 }
 ```
 
@@ -251,13 +252,22 @@ public void updateProduct(Product p) {
   "config": {
     "connector.class": "io.debezium.connector.mysql.MySqlConnector",
     "database.hostname": "mysql",
+    "database.port": "3306",
+    "database.user": "debezium",
+    "database.password": "${env:DB_PASSWORD}",
+    "topic.prefix": "cdc",
+    "schema.history.internal.kafka.bootstrap.servers": "kafka:9092",
+    "schema.history.internal.kafka.topic": "schema-changes.shop",
     "database.include.list": "shop",
     "table.include.list": "shop.outbox",
     "transforms": "outbox",
     "transforms.outbox.type": "io.debezium.transforms.outbox.EventRouter",
+    "transforms.outbox.route.by.field": "aggregate_type",
     "transforms.outbox.route.topic.replacement": "cdc.${routedByValue}",
     "transforms.outbox.table.field.event.key": "aggregate_id",
-    "transforms.outbox.table.field.event.payload": "payload"
+    "transforms.outbox.table.field.event.payload": "payload",
+    "transforms.outbox.table.field.event.type": "event_type",
+    "transforms.outbox.table.field.event.timestamp": "created_at"
   }
 }
 ```
@@ -385,6 +395,18 @@ func (c *Checker) Verify(ctx context.Context) (mismatch int, err error) {
 2. **换 embedding 模型 = 全量重建**：不同模型的向量空间不可比，混用会导致召回质量断崖。版本进索引名（`product_vec_v2`），切换时双写 + 灰度。
 3. **语义缓存要带出处**：缓存命中时仍要返回原文引用；原文已删除时缓存必须失效（否则「答了不该答的」）。
 
+**Agent 侧的「多存储」不止向量库，先把五笔账算清**：
+
+| 形态 | 传统对应 | Agent 侧的具体形态 | 权威/派生 | 典型失败 |
+| --- | --- | --- | --- | --- |
+| 事件表膨胀 | 订单流水/操作日志 | 每次 run/step/tool_call 各写事件；一次请求 10~30 行 | 权威（会话真相） | 不分区、不归档 → 单表 10 亿行，写入和回放都慢 |
+| 向量库 | ES 倒排索引 | 一篇文档切成 N 个 chunk，每个 chunk 一条向量 | 派生，可重建 | 删原文漏删向量；换 embedding 模型不重建 → 召回崩 |
+| 语义缓存 | Redis 结果缓存 | 相似问题直接复用旧答案 | 派生 + TTL + 出处 | 原文更新/删除后仍命中旧答案，答了不该答的 |
+| Prompt/会话存储 | 审计日志/工单 | 每轮完整 prompt + 工具结果，单条 10KB~1MB | 会话原文权威，摘要派生 | 塞进 MySQL 大字段 → 行溢出、备份膨胀；全放对象存储 → 读放大 |
+| 写放大 | 双写 | 一次工具调用写事件表、会话、向量、缓存、审计 5 处 | 只有事件表与业务表同事务 | 同步写 5 处 → P99 翻倍；异步写 → 不一致窗口 |
+
+算一笔账：日 10 万次 Agent 请求，每次 8 个 step、每 step 2 条事件 = 160 万行/天；每行 1KB（含工具参数与结果摘要）≈ 1.6GB/天，一年约 580GB。若每个 step 还把完整 prompt（平均 8KB）写进 MySQL，日增 6.4GB，一年约 2.3TB。**写放大不是「多写几次」，是把 1 次用户动作放大成 10~20 次存储写入；P99 和成本都按这个倍数走。**
+
 ```sql
 -- 向量与原文的一致性对账（pgvector）
 -- 找出「向量存在但原文已删」的孤儿 chunk
@@ -507,7 +529,7 @@ curl -X POST "es:9200/_aliases" -H 'Content-Type: application/json' -d '{
 | 关键词 | 必须记住的结论 |
 | --- | --- |
 | 本质 | 多存储不是「同步问题」，是「**权威源 + 不一致窗口 + 兜底**」 |
-| 四种形态 | 写一半 / 顺序错 / 重试重复 / 延迟回写 |
+| 四种形态 | 写一半 / 顺序错 / 缓存脏 / 重试重复 |
 | 等级 | L0 强一致 · L1 读己之写 · L2 有界不一致 · L3 最终 · L4 可能不一致；**派生存储最多 L2** |
 | 标准姿势 | 先写库 → 事务提交后删缓存（不是更新）→ 失败进重试 |
 | 延迟双删 | 治标，窗口靠版本号兜底；500ms 是拍的，主从延迟可能更长 |
