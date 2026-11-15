@@ -590,14 +590,19 @@ key.converter=org.apache.kafka.connect.storage.StringConverter
 value.converter=org.apache.kafka.connect.json.JsonConverter
 value.converter.schemas.enable=false
 
-offset.storage.topic=cdc.connect-offsets      # compact；位点（binlog 坐标）存这里
-offset.storage.partitions=25                  # 只在首次创建 topic 时生效
+# 位点（binlog 坐标）存这个 compact topic；partitions/replication 只在首次创建时生效
+offset.storage.topic=cdc.connect-offsets
+offset.storage.partitions=25
 offset.storage.replication.factor=3
 config.storage.topic=cdc.connect-configs
 status.storage.topic=cdc.connect-status
-offset.flush.interval.ms=5000                 # worker 默认；Debezium connector 可覆盖
+
+# worker 默认刷盘间隔；Debezium connector 可以用同名参数覆盖
+offset.flush.interval.ms=5000
 plugin.path=/opt/kafka/plugins
 ```
+
+> ⚠️ `.properties` 不支持「行尾注释」：`offset.storage.topic=cdc.connect-offsets  # compact` 会把 `# compact` 也算进值里，然后 topic 名就错了。注释必须单独一行。
 
 **逐项解释（配置错一个就会在生产上出事）**：
 
