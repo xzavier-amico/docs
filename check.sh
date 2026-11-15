@@ -127,7 +127,7 @@ done
 
 echo
 echo "═══ 5. 大纲清单 ↔ 章节状态 ═══"
-SYNC_FLAG="${1:-}" python3 - "${SERIES[@]}" <<'PY2'
+SYNC_FLAG=$(printf "%s\n" "$@" | grep -x -- "--sync" || true) python3 - "${SERIES[@]}" <<'PY2'
 import os, re, sys
 args = sys.argv[1:]
 sync = os.environ.get("SYNC_FLAG") == "--sync"
