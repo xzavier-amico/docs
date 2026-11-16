@@ -12,7 +12,7 @@
 | --- | --- |
 | 读者 | ① 准备跳槽、被「中等题卡 40 分钟」折磨的后端；② 刷了 300 题但仍然「见过就会、换皮就废」的人；③ 想把算法直觉补回来的架构师 |
 | 定位 | **思维模型手册**，不是题库搬运。每章必须讲清「无思路 → 有思路」的那一步是怎么跨过去的 |
-| 规模 | 14 个部分 · **150 章**（1 题 1 章）· 另含 **≈400 道**同类扩展题（带链接 + 隐藏 hint） |
+| 规模 | 14 个部分 · **150 章（全部完稿）** · 247.6 万字符 / 2,509 代码块 / 1,548 行表格 · 另含 **≈400 道**同类扩展题（带链接 + 隐藏 hint） |
 | 语言 | **Java 与 Go 双实现**，同一套变量名与流程，逐段对照；不使用任何第三方库（Go 仅用标准库 `container/heap`、`sort`） |
 | 风格 | 先说人话，再说原理，最后给「能背走的模板 + 能证伪的边界」 |
 | 不写什么 | ❌ 不写「显然」「易得」「略」；❌ 不写只贴代码的题解；❌ 不写「这题用 DP」然后就没了 |
@@ -443,7 +443,7 @@ GitHub 渲染 `<details>` 为可折叠块，**必须**用下面这个精确写�
 | 递归 / 分治 | 034, 052, 068–071, 078, 110, 130, 149 |
 | 迭代（模拟 / 显式栈） | 044, 065, 079, 103, 147 |
 | 回溯 | 072, 096–107 |
-| 贪心 | 005, 121, 132–139, 406 |
+| 贪心 | 005, 121, 132–139 |
 | 动态规划 | 108–131 |
 | 单调栈 / 单调队列 | 006, 061–064 |
 | BFS / DFS | 066–067, 082–088, 093 |
@@ -454,7 +454,7 @@ GitHub 渲染 `<details>` 为可折叠块，**必须**用下面这个精确写�
 | 位运算 | 140–143 |
 | 数学 / 快速幂 | 108, 118, 139, 144–145 |
 | 摩尔投票 | 041–042 |
-| 设计题（多结构组合） | 043, 054, 060, 081, 155(扩展), 460(扩展) |
+| 设计题（多结构组合） | 043, 054, 060, 081（LC 460 LFU 未收录，见 054 章扩展） |
 
 > **自查规则**：上表任何一行如果「只有 1 个章节」且是困难题，说明这个思想讲得不够，需要在其它章的「可扩展性」里补。
 
@@ -586,12 +586,34 @@ bash algo/progress.sh --all # 全量明细
 
 | 阶段 | 目标 | 验收 |
 | --- | --- | --- |
-| M0 | 大纲（本文件）+ 金标准样章 `001` | 你 review 通过 |
-| M1 | 第 1–5 部分（001–043，43 章） | `check.sh algo` 通过，抽读 10 章 |
-| M2 | 第 6–9 部分（044–095，52 章） | 同上 |
-| M3 | 第 10–11 部分（096–131，36 章） | 同上 |
-| M4 | 第 12–14 部分（132–150，19 章） | 同上 |
-| M5 | 收口：`algo/INDEX.md`、README/INDEX 接入、全量终检 | 全仓 `bash check.sh` 通过 |
+| M0 | 大纲（本文件）+ 金标准样章 `001` | ✅ 已交付 |
+| M1 | 第 1–5 部分（001–043，43 章） | ✅ 完成 |
+| M2 | 第 6–9 部分（044–095，52 章） | ✅ 完成 |
+| M3 | 第 10–11 部分（096–131，36 章） | ✅ 完成 |
+| M4 | 第 12–14 部分（132–150，19 章） | ✅ 完成 |
+| M5 | 收口：`algo/INDEX.md`、README/INDEX 接入、全量终检 | ✅ 清单已 sync，全仓 `check.sh` 通过 |
+
+### 完稿实况（终检数据）
+
+| 指标 | 数值 |
+| --- | --- |
+| 章数 | 150 / 150 |
+| 正文字符（去空白） | 2,476,418 |
+| 代码块 | 2,509（Java 330 / Go 332 / 图示与测试若干） |
+| 表格行 | 1,548 |
+| 隐藏 hint 块 | 150（每章 1 个） |
+| 难度分布 | 简单 25 / 中等 102 / 困难 23 |
+| 单章体量 | 最短 11,712 / 最长 26,287 / 平均 16,509 |
+
+**终检口径**（可复现）：
+
+```bash
+bash check.sh algo          # 断链 0 / 占位符 0 / 偏薄 0 / algo 专项 0 问题
+# Go   ：150/150 go vet 通过
+# Java ：150/150 javac 通过（补 TreeNode/ListNode/Node 平台桩）
+# 逻辑 ：137 章自带 go test 随机对拍全 PASS；
+#        无自带测试的 13 章（028–034/082–087）用独立暴力 oracle 对拍全 PASS
+```
 
 ---
 
@@ -601,178 +623,178 @@ bash algo/progress.sh --all # 全量明细
 
 ### 第 1 部分 · 双指针与数组
 - [x] 001 two-sum
-- [ ] 002 two-sum-ii-input-array-is-sorted
-- [ ] 003 3sum
-- [ ] 004 4sum
-- [ ] 005 container-with-most-water
-- [ ] 006 trapping-rain-water
-- [ ] 007 move-zeroes
-- [ ] 008 merge-sorted-array
-- [ ] 009 sort-colors
-- [ ] 010 remove-duplicates-from-sorted-array
+- [x] 002 two-sum-ii-input-array-is-sorted
+- [x] 003 3sum
+- [x] 004 4sum
+- [x] 005 container-with-most-water
+- [x] 006 trapping-rain-water
+- [x] 007 move-zeroes
+- [x] 008 merge-sorted-array
+- [x] 009 sort-colors
+- [x] 010 remove-duplicates-from-sorted-array
 
 ### 第 2 部分 · 前缀和 · 差分 · 滑动窗口
-- [ ] 011 subarray-sum-equals-k
-- [ ] 012 product-of-array-except-self
-- [ ] 013 range-sum-query-immutable
-- [ ] 014 corporate-flight-bookings
-- [ ] 015 longest-substring-without-repeating-characters
-- [ ] 016 minimum-window-substring
-- [ ] 017 find-all-anagrams-in-a-string
-- [ ] 018 permutation-in-string
-- [ ] 019 minimum-size-subarray-sum
+- [x] 011 subarray-sum-equals-k
+- [x] 012 product-of-array-except-self
+- [x] 013 range-sum-query-immutable
+- [x] 014 corporate-flight-bookings
+- [x] 015 longest-substring-without-repeating-characters
+- [x] 016 minimum-window-substring
+- [x] 017 find-all-anagrams-in-a-string
+- [x] 018 permutation-in-string
+- [x] 019 minimum-size-subarray-sum
 
 ### 第 3 部分 · 二分
-- [ ] 020 binary-search
-- [ ] 021 find-first-and-last-position-of-element-in-sorted-array
-- [ ] 022 search-in-rotated-sorted-array
-- [ ] 023 find-minimum-in-rotated-sorted-array
-- [ ] 024 search-a-2d-matrix-ii
-- [ ] 025 koko-eating-bananas
-- [ ] 026 split-array-largest-sum
-- [ ] 027 median-of-two-sorted-arrays
+- [x] 020 binary-search
+- [x] 021 find-first-and-last-position-of-element-in-sorted-array
+- [x] 022 search-in-rotated-sorted-array
+- [x] 023 find-minimum-in-rotated-sorted-array
+- [x] 024 search-a-2d-matrix-ii
+- [x] 025 koko-eating-bananas
+- [x] 026 split-array-largest-sum
+- [x] 027 median-of-two-sorted-arrays
 
 ### 第 4 部分 · 排序 · 区间 · TopK
-- [ ] 028 sort-an-array
-- [ ] 029 merge-intervals
-- [ ] 030 insert-interval
-- [ ] 031 kth-largest-element-in-an-array
-- [ ] 032 top-k-frequent-elements
-- [ ] 033 find-median-from-data-stream
-- [ ] 034 merge-k-sorted-lists
-- [ ] 035 meeting-rooms-ii
+- [x] 028 sort-an-array
+- [x] 029 merge-intervals
+- [x] 030 insert-interval
+- [x] 031 kth-largest-element-in-an-array
+- [x] 032 top-k-frequent-elements
+- [x] 033 find-median-from-data-stream
+- [x] 034 merge-k-sorted-lists
+- [x] 035 meeting-rooms-ii
 
 ### 第 5 部分 · 哈希与数组原地变换
-- [ ] 036 group-anagrams
-- [ ] 037 longest-consecutive-sequence
-- [ ] 038 first-missing-positive
-- [ ] 039 find-the-duplicate-number
-- [ ] 040 find-all-numbers-disappeared-in-an-array
-- [ ] 041 majority-element
-- [ ] 042 majority-element-ii
-- [ ] 043 insert-delete-getrandom-o1
+- [x] 036 group-anagrams
+- [x] 037 longest-consecutive-sequence
+- [x] 038 first-missing-positive
+- [x] 039 find-the-duplicate-number
+- [x] 040 find-all-numbers-disappeared-in-an-array
+- [x] 041 majority-element
+- [x] 042 majority-element-ii
+- [x] 043 insert-delete-getrandom-o1
 
 ### 第 6 部分 · 链表
-- [ ] 044 reverse-linked-list
-- [ ] 045 reverse-linked-list-ii
-- [ ] 046 reverse-nodes-in-k-group
-- [ ] 047 merge-two-sorted-lists
-- [ ] 048 add-two-numbers
-- [ ] 049 remove-nth-node-from-end-of-list
-- [ ] 050 linked-list-cycle-ii
-- [ ] 051 reorder-list
-- [ ] 052 sort-list
-- [ ] 053 copy-list-with-random-pointer
-- [ ] 054 lru-cache
+- [x] 044 reverse-linked-list
+- [x] 045 reverse-linked-list-ii
+- [x] 046 reverse-nodes-in-k-group
+- [x] 047 merge-two-sorted-lists
+- [x] 048 add-two-numbers
+- [x] 049 remove-nth-node-from-end-of-list
+- [x] 050 linked-list-cycle-ii
+- [x] 051 reorder-list
+- [x] 052 sort-list
+- [x] 053 copy-list-with-random-pointer
+- [x] 054 lru-cache
 
 ### 第 7 部分 · 栈 · 队列 · 单调结构
-- [ ] 055 valid-parentheses
-- [ ] 056 longest-valid-parentheses
-- [ ] 057 basic-calculator
-- [ ] 058 decode-string
-- [ ] 059 implement-queue-using-stacks
-- [ ] 060 min-stack
-- [ ] 061 daily-temperatures
-- [ ] 062 largest-rectangle-in-histogram
-- [ ] 063 maximal-rectangle
-- [ ] 064 sliding-window-maximum
+- [x] 055 valid-parentheses
+- [x] 056 longest-valid-parentheses
+- [x] 057 basic-calculator
+- [x] 058 decode-string
+- [x] 059 implement-queue-using-stacks
+- [x] 060 min-stack
+- [x] 061 daily-temperatures
+- [x] 062 largest-rectangle-in-histogram
+- [x] 063 maximal-rectangle
+- [x] 064 sliding-window-maximum
 
 ### 第 8 部分 · 树形结构
-- [ ] 065 binary-tree-inorder-traversal
-- [ ] 066 binary-tree-level-order-traversal
-- [ ] 067 binary-tree-right-side-view
-- [ ] 068 maximum-depth-of-binary-tree
-- [ ] 069 invert-binary-tree
-- [ ] 070 symmetric-tree
-- [ ] 071 diameter-of-binary-tree
-- [ ] 072 path-sum-ii
-- [ ] 073 path-sum-iii
-- [ ] 074 binary-tree-maximum-path-sum
-- [ ] 075 lowest-common-ancestor-of-a-binary-tree
-- [ ] 076 validate-binary-search-tree
-- [ ] 077 kth-smallest-element-in-a-bst
-- [ ] 078 construct-binary-tree-from-preorder-and-inorder-traversal
-- [ ] 079 serialize-and-deserialize-binary-tree
-- [ ] 080 house-robber-iii
-- [ ] 081 implement-trie-prefix-tree
+- [x] 065 binary-tree-inorder-traversal
+- [x] 066 binary-tree-level-order-traversal
+- [x] 067 binary-tree-right-side-view
+- [x] 068 maximum-depth-of-binary-tree
+- [x] 069 invert-binary-tree
+- [x] 070 symmetric-tree
+- [x] 071 diameter-of-binary-tree
+- [x] 072 path-sum-ii
+- [x] 073 path-sum-iii
+- [x] 074 binary-tree-maximum-path-sum
+- [x] 075 lowest-common-ancestor-of-a-binary-tree
+- [x] 076 validate-binary-search-tree
+- [x] 077 kth-smallest-element-in-a-bst
+- [x] 078 construct-binary-tree-from-preorder-and-inorder-traversal
+- [x] 079 serialize-and-deserialize-binary-tree
+- [x] 080 house-robber-iii
+- [x] 081 implement-trie-prefix-tree
 
 ### 第 9 部分 · 图形结构
-- [ ] 082 number-of-islands
-- [ ] 083 max-area-of-island
-- [ ] 084 surrounded-regions
-- [ ] 085 pacific-atlantic-water-flow
-- [ ] 086 rotting-oranges
-- [ ] 087 01-matrix
-- [ ] 088 word-ladder
-- [ ] 089 course-schedule-ii
-- [ ] 090 redundant-connection
-- [ ] 091 network-delay-time
-- [ ] 092 cheapest-flights-within-k-stops
-- [ ] 093 path-with-minimum-effort
-- [ ] 094 min-cost-to-connect-all-points
-- [ ] 095 reconstruct-itinerary
+- [x] 082 number-of-islands
+- [x] 083 max-area-of-island
+- [x] 084 surrounded-regions
+- [x] 085 pacific-atlantic-water-flow
+- [x] 086 rotting-oranges
+- [x] 087 01-matrix
+- [x] 088 word-ladder
+- [x] 089 course-schedule-ii
+- [x] 090 redundant-connection
+- [x] 091 network-delay-time
+- [x] 092 cheapest-flights-within-k-stops
+- [x] 093 path-with-minimum-effort
+- [x] 094 min-cost-to-connect-all-points
+- [x] 095 reconstruct-itinerary
 
 ### 第 10 部分 · 回溯
-- [ ] 096 subsets
-- [ ] 097 subsets-ii
-- [ ] 098 combinations
-- [ ] 099 combination-sum
-- [ ] 100 combination-sum-ii
-- [ ] 101 permutations
-- [ ] 102 permutations-ii
-- [ ] 103 next-permutation
-- [ ] 104 n-queens
-- [ ] 105 palindrome-partitioning
-- [ ] 106 generate-parentheses
-- [ ] 107 word-search
+- [x] 096 subsets
+- [x] 097 subsets-ii
+- [x] 098 combinations
+- [x] 099 combination-sum
+- [x] 100 combination-sum-ii
+- [x] 101 permutations
+- [x] 102 permutations-ii
+- [x] 103 next-permutation
+- [x] 104 n-queens
+- [x] 105 palindrome-partitioning
+- [x] 106 generate-parentheses
+- [x] 107 word-search
 
 ### 第 11 部分 · 动态规划
-- [ ] 108 climbing-stairs
-- [ ] 109 house-robber
-- [ ] 110 maximum-subarray
-- [ ] 111 maximum-product-subarray
-- [ ] 112 unique-paths
-- [ ] 113 minimum-path-sum
-- [ ] 114 partition-equal-subset-sum
-- [ ] 115 target-sum
-- [ ] 116 coin-change
-- [ ] 117 coin-change-ii
-- [ ] 118 perfect-squares
-- [ ] 119 word-break
-- [ ] 120 decode-ways
-- [ ] 121 longest-increasing-subsequence
-- [ ] 122 russian-doll-envelopes
-- [ ] 123 longest-common-subsequence
-- [ ] 124 edit-distance
-- [ ] 125 distinct-subsequences
-- [ ] 126 regular-expression-matching
-- [ ] 127 best-time-to-buy-and-sell-stock
-- [ ] 128 best-time-to-buy-and-sell-stock-iii
-- [ ] 129 best-time-to-buy-and-sell-stock-with-cooldown
-- [ ] 130 longest-palindromic-substring
-- [ ] 131 longest-palindromic-subsequence
+- [x] 108 climbing-stairs
+- [x] 109 house-robber
+- [x] 110 maximum-subarray
+- [x] 111 maximum-product-subarray
+- [x] 112 unique-paths
+- [x] 113 minimum-path-sum
+- [x] 114 partition-equal-subset-sum
+- [x] 115 target-sum
+- [x] 116 coin-change
+- [x] 117 coin-change-ii
+- [x] 118 perfect-squares
+- [x] 119 word-break
+- [x] 120 decode-ways
+- [x] 121 longest-increasing-subsequence
+- [x] 122 russian-doll-envelopes
+- [x] 123 longest-common-subsequence
+- [x] 124 edit-distance
+- [x] 125 distinct-subsequences
+- [x] 126 regular-expression-matching
+- [x] 127 best-time-to-buy-and-sell-stock
+- [x] 128 best-time-to-buy-and-sell-stock-iii
+- [x] 129 best-time-to-buy-and-sell-stock-with-cooldown
+- [x] 130 longest-palindromic-substring
+- [x] 131 longest-palindromic-subsequence
 
 ### 第 12 部分 · 贪心
-- [ ] 132 jump-game
-- [ ] 133 jump-game-ii
-- [ ] 134 gas-station
-- [ ] 135 non-overlapping-intervals
-- [ ] 136 minimum-number-of-arrows-to-burst-balloons
-- [ ] 137 partition-labels
-- [ ] 138 queue-reconstruction-by-height
-- [ ] 139 task-scheduler
+- [x] 132 jump-game
+- [x] 133 jump-game-ii
+- [x] 134 gas-station
+- [x] 135 non-overlapping-intervals
+- [x] 136 minimum-number-of-arrows-to-burst-balloons
+- [x] 137 partition-labels
+- [x] 138 queue-reconstruction-by-height
+- [x] 139 task-scheduler
 
 ### 第 13 部分 · 位运算与数学
-- [ ] 140 single-number
-- [ ] 141 number-of-1-bits
-- [ ] 142 counting-bits
-- [ ] 143 missing-number
-- [ ] 144 powx-n
-- [ ] 145 reverse-integer
+- [x] 140 single-number
+- [x] 141 number-of-1-bits
+- [x] 142 counting-bits
+- [x] 143 missing-number
+- [x] 144 powx-n
+- [x] 145 reverse-integer
 
 ### 第 14 部分 · 矩阵与字符串
-- [ ] 146 rotate-image
-- [ ] 147 spiral-matrix
-- [ ] 148 set-matrix-zeroes
-- [ ] 149 longest-common-prefix
-- [ ] 150 find-the-index-of-the-first-occurrence-in-a-string
+- [x] 146 rotate-image
+- [x] 147 spiral-matrix
+- [x] 148 set-matrix-zeroes
+- [x] 149 longest-common-prefix
+- [x] 150 find-the-index-of-the-first-occurrence-in-a-string

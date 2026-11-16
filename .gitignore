@@ -1,0 +1,9 @@
+# 编译产物（写作时抽查代码会留下）
+*.class
+*.jar
+algo/out/
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
