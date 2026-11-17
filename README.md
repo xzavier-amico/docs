@@ -24,7 +24,7 @@
 - 🤖 **AgentOS 平台架构**：[`llm/0-summary.md`](llm/0-summary.md)（52 章）
 - 🔧 **分布式工程实战**：[`eng/0-summary.md`](eng/0-summary.md)（52 章：幂等/事务/韧性/消息/编排/存储/运维运营）
 - 🧠 **算法思维训练**：[`algo/0-summary.md`](algo/0-summary.md)（150 章：14 部分 · 双指针/二分/DP/图/回溯/贪心，Java+Go 双解）
-- 🏛️ **系统设计实战**：[`architect/0-summary.md`](architect/0-summary.md)（26 篇：约束→形态→14 个真实系统，短链/IM/检索/推荐/迁移/秒杀/多租户）
+- 🏛️ **系统设计实战**：[`architect/0-summary.md`](architect/0-summary.md)（26 篇：约束→形态→14 个真实系统，短链/IM/检索/推荐/迁移/秒杀/多租户）· [合订本总目](architect/0-compiled.md)
 
 ## 五套文档的关系
 
