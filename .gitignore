@@ -1,9 +1,50 @@
-# 编译产物（写作时抽查代码会留下）
+# ── 编译产物（写作时抽查代码会留下）──
 *.class
 *.jar
+*.war
+*.o
+*.out
+target/
+build/
+node_modules/
+__pycache__/
+*.py[cod]
 algo/out/
 
-# 编辑器 / 系统
+# ── macOS 系统垃圾 ──
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+.TemporaryItems
+.fseventsd
+.apdisk
+__MACOSX/
+
+# ── Windows / Linux 系统垃圾 ──
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.directory
+
+# ── 编辑器 / IDE ──
 .idea/
+*.iml
 .vscode/
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+*.code-workspace
+
+# ── 临时与备份 ──
+*.bak
+*.orig
+*.rej
+*.tmp
+*.log
+*~
+.tmp/
+tmp/
