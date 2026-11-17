@@ -372,10 +372,10 @@ bash comp/progress.sh
 | 部分 | 篇数 | 状态 |
 | --- | --- | --- |
 | 总纲 | 1 | ✅ |
-| **已完稿正文** | **13 / 53** | 🚧 第二批：01–10 已齐 |
+| **已完稿正文** | **16 / 53** | 🚧 第三批：Part I–II 全齐 + Redis 2 篇 |
 | Part I 地基 | 4 | ✅ 4/4（01–04） |
-| Part II 关系库与事务内核 | 7 | 🚧 6/7（05–10 已完稿，11 PostgreSQL 对照待写） |
-| Part III 内存与无主 KV | 5 | 📝 待开写 |
+| Part II 关系库与事务内核 | 7 | ✅ 7/7（05–11） |
+| Part III 内存与无主 KV | 5 | 🚧 2/5（12、13 已完稿） |
 | Part IV LSM 族与分析 | 4 | 📝 待开写 |
 | Part V 检索与向量 | 7 | 🚧 2/7（21、22 已完稿） |
 | Part VI 消息、流与定时 | 9 | 📝 待开写 |
@@ -397,9 +397,9 @@ bash comp/progress.sh
 - [x] 08 redo / undo / binlog 与内部两阶段提交
 - [x] 09 优化器与执行计划：索引为什么会「失效」
 - [x] 10 主从复制与高可用：半同步、并行回放与 MGR
-- [ ] 11 PostgreSQL 对照：堆表、xmin/xmax 与 VACUUM
-- [ ] 12 单线程的真相：事件循环、为什么快、多线程在哪
-- [ ] 13 数据结构与底层编码：ziplist、listpack、skiplist
+- [x] 11 PostgreSQL 对照：堆表、xmin/xmax 与 VACUUM
+- [x] 12 单线程的真相：事件循环、为什么快、多线程在哪
+- [x] 13 数据结构与底层编码：ziplist、listpack、skiplist
 - [ ] 14 持久化与主从同步：fork、COW 与 replication backlog
 - [ ] 15 Cluster：16384 槽、MOVED/ASK 与扩容迁移
 - [ ] 16 一致性哈希与 quorum：Dynamo 家族的 N/R/W
