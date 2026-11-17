@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# comp/ 进度统计
+cd "$(dirname "$0")" || exit 1
+
+total=53
+done=$(ls [0-9][0-9]-*.md 2>/dev/null | wc -l | tr -d ' ')
+chars=$(cat [0-9][0-9]-*.md 2>/dev/null | wc -m | tr -d ' ')
+
+printf "comp/ 进度（《存储与中间件剖析：内核形态决定架构边界》）\n"
+printf "  章节   %s / %s\n" "$done" "$total"
+printf "  字符   %s\n" "$chars"
+printf "\n"
+printf "%-52s %8s\n" "文件" "字符"
+for f in [0-9][0-9]-*.md; do
+  [ -e "$f" ] || continue
+  printf "%-52s %8s\n" "$f" "$(wc -m < "$f" | tr -d ' ')"
+done

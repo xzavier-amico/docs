@@ -8,7 +8,7 @@ SERIES=()
 for a in "$@"; do
   case "$a" in --*) ;; *) SERIES+=("$a") ;; esac
 done
-[ ${#SERIES[@]} -eq 0 ] && SERIES=(go llm eng algo architect)
+[ ${#SERIES[@]} -eq 0 ] && SERIES=(go llm eng algo architect comp)
 
 fail=0
 
