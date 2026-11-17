@@ -391,7 +391,7 @@ if retryBudget.Exhausted() {
 **全书导航**
 
 - 上一章：[51. 开源生态盘点与选型矩阵](51-opensource-landscape.md)
-- 回到起点：[1. 从 Demo 到生产：Agent 的 10 个断崖](1-agent-vs-demo-gap.md)（用 §1.12 的体检表给自己打一次分）
+- 回到起点：[1. 从 Demo 到生产：Agent 的 10 个断崖](1-agent-vs-demo-gap.md)（用 §1.13 的体检表给自己打一次分）
 - 总纲：[0-summary.md](0-summary.md)
 - 全书十部分速查：
   - 认知（1-4）→ 分离架构（5-9）→ 生命周期与调度（10-14）
