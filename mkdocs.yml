@@ -1,0 +1,81 @@
+site_name: AI Docs
+site_description: Go 语言深水区、AI-Agent 架构、分布式工程、算法与系统设计
+site_url: https://xzavier-amico.github.io/docs/
+docs_dir: build/docs
+site_dir: build/site
+use_directory_urls: true
+
+theme:
+  name: material
+  language: zh
+  font: false
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: 切换到深色模式
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: 切换到浅色模式
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.select
+
+plugins:
+  - search:
+      lang:
+        - zh
+        - en
+  - awesome-nav
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+exclude_docs: |
+  README.md
+  *.sh
+  mkdocs.yml
+  requirements.txt
+  *.class
+  *.jar
+  target/
+  build/
+  algo/out/
+  __pycache__/
+  *.py[cod]
+
+not_in_nav: |
+  README.md
+  INDEX.md
+  */INDEX.md
+  */0-summary.md
+  architect/0-compiled.md
+
+extra:
+  generator: false

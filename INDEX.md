@@ -188,7 +188,7 @@ llm/ 1 ──▶ 2 ──▶ 3 ──▶ 4(总架构)
 - **Go 系列**：54 章全表、Java↔Go 术语映射、四条阅读路线 → [`go/0-summary.md`](go/0-summary.md)
 - **AgentOS 系列**：52 章全表、内核类比表、比例账、里程碑 → [`llm/0-summary.md`](llm/0-summary.md)
 - **组件剖析**（大纲阶段）：37 篇清单、解剖卡八问、三本放大账、故障谱 → [`comp/0-summary.md`](comp/0-summary.md)
-- **字数与章节明细**：仓库 [README](README.md) 末尾有两张完整章节索引表
+- **字数与章节明细**：见[首页](index.md)与各系列章节索引
 - **进度**：`bash go/progress.sh --all` / `bash llm/progress.sh --all`
 
 ---
