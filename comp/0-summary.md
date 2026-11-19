@@ -372,7 +372,7 @@ bash comp/progress.sh
 | 部分 | 篇数 | 状态 |
 | --- | --- | --- |
 | 总纲 | 1 | ✅ |
-| **已完稿正文** | **41 / 53** | 🚧 第八批：Part VIII 2/3 |
+| **已完稿正文** | **44 / 53** | 🚧 第九批：Part VIII 收官 + Part IX 开篇 |
 | Part I 地基 | 4 | ✅ 4/4（01–04） |
 | Part II 关系库与事务内核 | 7 | ✅ 7/7（05–11） |
 | Part III 内存与无主 KV | 5 | ✅ 5/5（12–16） |
@@ -380,8 +380,8 @@ bash comp/progress.sh
 | Part V 检索与向量 | 7 | ✅ 7/7（21–27） |
 | Part VI 消息、流与定时 | 9 | ✅ 9/9（28–36） |
 | Part VII 协调、注册与配置 | 2 | ✅ 2/2（37–38） |
-| Part VIII 入口与通信 | 3 | 🚧 2/3（39、40 已完稿） |
-| Part IX 横切基础件 | 7 | 📝 待开写 |
+| Part VIII 入口与通信 | 3 | ✅ 3/3（39–41） |
+| Part IX 横切基础件 | 7 | 🚧 2/7（42、43 已完稿） |
 | Part X Agent 栈 | 3 | 🚧 1/3（49 已完稿） |
 | Part XI 收口 | 2 | 📝 待开写 |
 
@@ -427,9 +427,9 @@ bash comp/progress.sh
 - [x] 38 注册中心与配置中心：Nacos / Consul / Apollo
 - [x] 39 入口网关与负载均衡：Nginx / Envoy / LVS
 - [x] 40 RPC 与连接复用：gRPC(HTTP/2) / Dubbo
-- [ ] 41 服务网格与 xDS：sidecar 的账
-- [ ] 42 对象存储与云盘：S3 语义、multipart、限流与 IOPS 模型
-- [ ] 43 事务组件：XA、Seata AT 与 TCC 的内核
+- [x] 41 服务网格与 xDS：sidecar 的账
+- [x] 42 对象存储与云盘：S3 语义、multipart、限流与 IOPS 模型
+- [x] 43 事务组件：XA、Seata AT 与 TCC 的内核
 - [ ] 44 连接池与客户端：为什么 20 个连接就够
 - [ ] 45 分布式 ID：Snowflake、号段与时钟回拨
 - [ ] 46 分布式锁与选主：Redlock 争议与 fencing token
