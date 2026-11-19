@@ -372,13 +372,13 @@ bash comp/progress.sh
 | 部分 | 篇数 | 状态 |
 | --- | --- | --- |
 | 总纲 | 1 | ✅ |
-| **已完稿正文** | **20 / 53** | 🚧 第四批：Part I–III 全齐 + MongoDB |
+| **已完稿正文** | **30 / 53** | 🚧 第五批：Part IV、Part V 收官 + Kafka 开篇 |
 | Part I 地基 | 4 | ✅ 4/4（01–04） |
 | Part II 关系库与事务内核 | 7 | ✅ 7/7（05–11） |
 | Part III 内存与无主 KV | 5 | ✅ 5/5（12–16） |
-| Part IV LSM 族与分析 | 4 | 🚧 1/4（17 已完稿） |
-| Part V 检索与向量 | 7 | 🚧 2/7（21、22 已完稿） |
-| Part VI 消息、流与定时 | 9 | 📝 待开写 |
+| Part IV LSM 族与分析 | 4 | ✅ 4/4（17–20） |
+| Part V 检索与向量 | 7 | ✅ 7/7（21–27） |
+| Part VI 消息、流与定时 | 9 | 🚧 2/9（28、29 已完稿） |
 | Part VII 协调、注册与配置 | 2 | 📝 待开写 |
 | Part VIII 入口与通信 | 3 | 📝 待开写 |
 | Part IX 横切基础件 | 7 | 📝 待开写 |
@@ -404,18 +404,18 @@ bash comp/progress.sh
 - [x] 15 Cluster：16384 槽、MOVED/ASK 与扩容迁移
 - [x] 16 一致性哈希与 quorum：Dynamo 家族的 N/R/W
 - [x] 17 MongoDB：BSON、WiredTiger 与 oplog
-- [ ] 18 HBase：LSM、Region 与 RowKey 设计
-- [ ] 19 RocksDB 与 TiKV：可嵌入 LSM + Raft + PD
-- [ ] 20 ClickHouse / MergeTree：列存为什么快、为什么不能当主库
+- [x] 18 HBase：LSM、Region 与 RowKey 设计
+- [x] 19 RocksDB 与 TiKV：可嵌入 LSM + Raft + PD
+- [x] 20 ClickHouse / MergeTree：列存为什么快、为什么不能当主库
 - [x] 21 倒排索引的物理结构：一个 term 怎么找到 doc
 - [x] 22 段：不可变、refresh、flush 与 merge
-- [ ] 23 集群形态：分片、副本、路由与 master 选举
-- [ ] 24 查询执行：query vs filter、BM25、scroll 与深分页
-- [ ] 25 容量与故障：mapping 爆炸、堆、merge 与零停机重建
-- [ ] 26 向量索引内核：HNSW 图、IVF 与 PQ 码本
-- [ ] 27 向量库的工程形态：Milvus / Qdrant / pgvector 与混合检索
-- [ ] 28 Kafka 的日志：segment、稀疏索引与零拷贝
-- [ ] 29 复制与一致性：ISR、HW、LEO 与 acks
+- [x] 23 集群形态：分片、副本、路由与 master 选举
+- [x] 24 查询执行：query vs filter、BM25、scroll 与深分页
+- [x] 25 容量与故障：mapping 爆炸、堆、merge 与零停机重建
+- [x] 26 向量索引内核：HNSW 图、IVF 与 PQ 码本
+- [x] 27 向量库的工程形态：Milvus / Qdrant / pgvector 与混合检索
+- [x] 28 Kafka 的日志：segment、稀疏索引与零拷贝
+- [x] 29 复制与一致性：ISR、HW、LEO 与 acks
 - [ ] 30 消费组与 rebalance：协议、位点与积压
 - [ ] 31 消息族谱：RocketMQ / Pulsar / RabbitMQ / NATS
 - [ ] 32 任务队列语义：SQS、Redis Streams、可见性超时与死信

@@ -103,7 +103,7 @@ Kafka 的故障有个统一特征：**进程活着、端口通着、消费组也
 ├── 00000000000007375380.log          ← 正在写的「活跃段」(active segment)
 ├── 00000000000007375380.index
 ├── 00000000000007375380.timeindex
-└── leader-epoch-checkpoint           ← 每个目录一份，记录各分区 leader 纪元
+└── leader-epoch-checkpoint           ← 每个分区目录一份，记录该分区历任 leader 的纪元
 
 文件名就是该段第一条消息的 offset（20 位零填充）：
   段名 = baseOffset  ⇒  「找 offset 在哪一段」= 「在一组有序的长整数上二分」
@@ -427,7 +427,7 @@ sudo grep -ci 'down-conversion\|convert.*message.*format' /var/log/kafka/server.
 | 6 | 分到 broker（12 台） | 626 ÷ 12 | 52 TB/broker |
 | 7 | 每 broker 盘阵 | 12 块 8 TB JBOD = 96 TB 裸，水线 75% → 72 TB 可用 | 72 > 52 ✓（余量 38%） |
 | 8 | 写入带宽复核 | 25.92 TB/天 ÷ 86,400 = 300 MB/s 逻辑；× 3（RF）= 900 MB/s 物理 | 每 broker 75 MB/s，每盘 6.25 MB/s —— **盘完全不紧张** |
-| 9 | 反向验算：改成保留 30 天 | 626 × 30/7 | **≈ 2.68 PB → 需要 51 台**或改分层存储（→ comp/42、comp/35） |
+| 9 | 反向验算：改成保留 30 天 | 626 × 30/7 | **≈ 2.68 PB → 需要约 52 台**或改分层存储（→ comp/42、comp/35） |
 
 第 8 步是这张表最容易被忽略的一格：**保留窗口的瓶颈从来不是写带宽，是容量。** 900 MB/s 分散到 12 台机器只有 75 MB/s/台，而容量需求却是 626 TB。所以「Kafka 扩容」几乎总是**加盘量**，而不是加盘速——这也解释了为什么 HDD + JBOD 在 Kafka 上依然是主流（顺序写对 HDD 友好到几乎没有惩罚）。
 
