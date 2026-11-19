@@ -372,13 +372,13 @@ bash comp/progress.sh
 | 部分 | 篇数 | 状态 |
 | --- | --- | --- |
 | 总纲 | 1 | ✅ |
-| **已完稿正文** | **30 / 53** | 🚧 第五批：Part IV、Part V 收官 + Kafka 开篇 |
+| **已完稿正文** | **37 / 53** | 🚧 第六批：Part VI 收官（消息、流与定时全齐） |
 | Part I 地基 | 4 | ✅ 4/4（01–04） |
 | Part II 关系库与事务内核 | 7 | ✅ 7/7（05–11） |
 | Part III 内存与无主 KV | 5 | ✅ 5/5（12–16） |
 | Part IV LSM 族与分析 | 4 | ✅ 4/4（17–20） |
 | Part V 检索与向量 | 7 | ✅ 7/7（21–27） |
-| Part VI 消息、流与定时 | 9 | 🚧 2/9（28、29 已完稿） |
+| Part VI 消息、流与定时 | 9 | ✅ 9/9（28–36） |
 | Part VII 协调、注册与配置 | 2 | 📝 待开写 |
 | Part VIII 入口与通信 | 3 | 📝 待开写 |
 | Part IX 横切基础件 | 7 | 📝 待开写 |
@@ -416,13 +416,13 @@ bash comp/progress.sh
 - [x] 27 向量库的工程形态：Milvus / Qdrant / pgvector 与混合检索
 - [x] 28 Kafka 的日志：segment、稀疏索引与零拷贝
 - [x] 29 复制与一致性：ISR、HW、LEO 与 acks
-- [ ] 30 消费组与 rebalance：协议、位点与积压
-- [ ] 31 消息族谱：RocketMQ / Pulsar / RabbitMQ / NATS
-- [ ] 32 任务队列语义：SQS、Redis Streams、可见性超时与死信
-- [ ] 33 CDC：Debezium / Canal 与「快照 + 增量」衔接
-- [ ] 34 Flink：checkpoint、watermark、状态后端与背压
-- [ ] 35 Iceberg / 表格式：快照、清单与 COW vs MOR
-- [ ] 36 定时与延迟：时间轮、延迟队列与事务消息回查
+- [x] 30 消费组与 rebalance：协议、位点与积压
+- [x] 31 消息族谱：RocketMQ / Pulsar / RabbitMQ / NATS
+- [x] 32 任务队列语义：SQS、Redis Streams、可见性超时与死信
+- [x] 33 CDC：Debezium / Canal 与「快照 + 增量」衔接
+- [x] 34 Flink：checkpoint、watermark、状态后端与背压
+- [x] 35 Iceberg / 表格式：快照、清单与 COW vs MOR
+- [x] 36 定时与延迟：时间轮、延迟队列与事务消息回查
 - [ ] 37 ZooKeeper vs etcd：ZAB、Raft、session 与 watch
 - [ ] 38 注册中心与配置中心：Nacos / Consul / Apollo
 - [ ] 39 入口网关与负载均衡：Nginx / Envoy / LVS
