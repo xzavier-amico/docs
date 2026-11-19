@@ -372,7 +372,7 @@ bash comp/progress.sh
 | 部分 | 篇数 | 状态 |
 | --- | --- | --- |
 | 总纲 | 1 | ✅ |
-| **已完稿正文** | **50 / 53** | 🚧 第十一批：Part IX 收官 + Agent 栈 2/3 |
+| **已完稿正文** | **53 / 53** | ✅ 全书完稿（Part I–XI 全齐） |
 | Part I 地基 | 4 | ✅ 4/4（01–04） |
 | Part II 关系库与事务内核 | 7 | ✅ 7/7（05–11） |
 | Part III 内存与无主 KV | 5 | ✅ 5/5（12–16） |
@@ -382,8 +382,8 @@ bash comp/progress.sh
 | Part VII 协调、注册与配置 | 2 | ✅ 2/2（37–38） |
 | Part VIII 入口与通信 | 3 | ✅ 3/3（39–41） |
 | Part IX 横切基础件 | 7 | ✅ 7/7（42–48） |
-| Part X Agent 栈 | 3 | 🚧 2/3（49、50 已完稿） |
-| Part XI 收口 | 2 | 📝 待开写 |
+| Part X Agent 栈 | 3 | ✅ 3/3（49–51） |
+| Part XI 收口 | 2 | ✅ 2/2（52–53） |
 
 ## 0.11 章节清单（`check.sh` 以此核对状态）
 
@@ -437,6 +437,6 @@ bash comp/progress.sh
 - [x] 48 可观测底座：Prometheus TSDB 与 OTel Collector
 - [x] 49 推理引擎：vLLM、PagedAttention、continuous batching 与 KV cache
 - [x] 50 LLM 网关与配额代理：多供应商兼容、重试熔断、语义缓存
-- [ ] 51 执行面：cgroup / gVisor / microVM / WASM 与浏览器池
-- [ ] 52 组件故障谱：五类失效、观测信号与兜底招式
-- [ ] 53 收口：53 张解剖卡合订 + 反模式库 + 换零件信号表
+- [x] 51 执行面：cgroup / gVisor / microVM / WASM 与浏览器池
+- [x] 52 组件故障谱：五类失效、观测信号与兜底招式
+- [x] 53 收口：53 张解剖卡合订 + 反模式库 + 换零件信号表
