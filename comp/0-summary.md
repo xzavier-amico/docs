@@ -372,7 +372,7 @@ bash comp/progress.sh
 | 部分 | 篇数 | 状态 |
 | --- | --- | --- |
 | 总纲 | 1 | ✅ |
-| **已完稿正文** | **47 / 53** | 🚧 第十批：Part IX 5/7 |
+| **已完稿正文** | **50 / 53** | 🚧 第十一批：Part IX 收官 + Agent 栈 2/3 |
 | Part I 地基 | 4 | ✅ 4/4（01–04） |
 | Part II 关系库与事务内核 | 7 | ✅ 7/7（05–11） |
 | Part III 内存与无主 KV | 5 | ✅ 5/5（12–16） |
@@ -381,8 +381,8 @@ bash comp/progress.sh
 | Part VI 消息、流与定时 | 9 | ✅ 9/9（28–36） |
 | Part VII 协调、注册与配置 | 2 | ✅ 2/2（37–38） |
 | Part VIII 入口与通信 | 3 | ✅ 3/3（39–41） |
-| Part IX 横切基础件 | 7 | 🚧 5/7（42–46 已完稿） |
-| Part X Agent 栈 | 3 | 🚧 1/3（49 已完稿） |
+| Part IX 横切基础件 | 7 | ✅ 7/7（42–48） |
+| Part X Agent 栈 | 3 | 🚧 2/3（49、50 已完稿） |
 | Part XI 收口 | 2 | 📝 待开写 |
 
 ## 0.11 章节清单（`check.sh` 以此核对状态）
@@ -433,10 +433,10 @@ bash comp/progress.sh
 - [x] 44 连接池与客户端：为什么 20 个连接就够
 - [x] 45 分布式 ID：Snowflake、号段与时钟回拨
 - [x] 46 分布式锁与选主：Redlock 争议与 fencing token
-- [ ] 47 密钥与凭据：Vault / KMS / OIDC 与轮转
-- [ ] 48 可观测底座：Prometheus TSDB 与 OTel Collector
+- [x] 47 密钥与凭据：Vault / KMS / OIDC 与轮转
+- [x] 48 可观测底座：Prometheus TSDB 与 OTel Collector
 - [x] 49 推理引擎：vLLM、PagedAttention、continuous batching 与 KV cache
-- [ ] 50 LLM 网关与配额代理：多供应商兼容、重试熔断、语义缓存
+- [x] 50 LLM 网关与配额代理：多供应商兼容、重试熔断、语义缓存
 - [ ] 51 执行面：cgroup / gVisor / microVM / WASM 与浏览器池
 - [ ] 52 组件故障谱：五类失效、观测信号与兜底招式
 - [ ] 53 收口：53 张解剖卡合订 + 反模式库 + 换零件信号表
