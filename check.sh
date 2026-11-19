@@ -8,7 +8,7 @@ SERIES=()
 for a in "$@"; do
   case "$a" in --*) ;; *) SERIES+=("$a") ;; esac
 done
-[ ${#SERIES[@]} -eq 0 ] && SERIES=(go llm eng algo architect comp base)
+[ ${#SERIES[@]} -eq 0 ] && SERIES=(go llm eng algo architect comp base llm_base)
 
 fail=0
 
@@ -111,10 +111,11 @@ import os, re, sys
 series = sys.argv[1:]
 THIN = 11000
 ALGO_THIN = 6000
+LLM_BASE_THIN = 1500
 for s in series:
     if not os.path.isdir(s):
         continue
-    thin_base = ALGO_THIN if s == "algo" else THIN
+    thin_base = {"algo": ALGO_THIN, "llm_base": LLM_BASE_THIN}.get(s, THIN)
     files = [f for f in sorted(os.listdir(s)) if re.match(r"^\d+-.+\.md$", f)]
     done = thin = 0
     chars = 0
@@ -130,17 +131,24 @@ for s in series:
         done += is_done
         secs = len(re.findall(r"^## ", t, re.M))
         tables = len(re.findall(r"^\|[-: |]+\|$", t, re.M))
-        codes = t.count("```") // 2
+        blocks = t.count("```") // 2
+        if s == "llm_base":
+            visual = re.findall(r"^```text[ \t]*\n(.*?)^```[ \t]*$", t, re.M | re.S)
+            structure_short = secs < 4 or tables < 2 or not any(
+                re.search(r"[→←↑↓│─┌└]", diagram) for diagram in visual
+            )
+        else:
+            structure_short = secs < 6 or tables < 2 or blocks < 2
         flag = ""
         if is_done and c < thin_base:
             thin += 1; flag = "  ⚠️ 偏薄"
-        if is_done and (secs < 6 or tables < 2 or codes < 2):
+        if is_done and structure_short:
             flag += "  ⚠️ 结构不足"
-        rows.append((n, c, secs, tables, codes, flag))
+        rows.append((n, c, secs, tables, blocks, flag))
     print(f"  [{s}] 章节 {len(files)-1}，已完成 {done}，正文 {chars/10000:.1f} 万字，偏薄 {thin}")
-    for n, c, secs, tables, codes, flag in rows:
+    for n, c, secs, tables, blocks, flag in rows:
         if flag:
-            print(f"    {n:>2}  {c:>6}字  {secs:>2}节  {tables:>2}表  {codes:>2}码{flag}")
+            print(f"    {n:>2}  {c:>6}字  {secs:>2}节  {tables:>2}表  {blocks:>2}围栏{flag}")
 PY
 
 echo
