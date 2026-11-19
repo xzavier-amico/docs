@@ -470,19 +470,13 @@ change:
 ```go
 // Consul blocking query 骨架：三个细节 ① 保留 index ② wait 超时不是错误 ③ 出错必须退避
 type entry struct {
-	Service struct {
-		Address string `json:"Address"`
-		Port    int    `json:"Port"`
-	} `json:"Service"`
+	Service struct{ Address string; Port int } `json:"Service"`
 }
 
 func WatchService(ctx context.Context, addr, name string, fn func([]string)) error {
 	var index uint64
 	backoff := 500 * time.Millisecond
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
+	for ctx.Err() == nil {
 		u := fmt.Sprintf("http://%s/v1/health/service/%s?passing=true&index=%d&wait=5m", addr, name, index)
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 		resp, err := http.DefaultClient.Do(req)
@@ -499,20 +493,20 @@ func WatchService(ctx context.Context, addr, name string, fn func([]string)) err
 		var entries []entry
 		err = json.NewDecoder(resp.Body).Decode(&entries)
 		resp.Body.Close()
-		if err == nil {
-			backoff = 500 * time.Millisecond // 成功一次就把退避清回去
-			addrs := make([]string, 0, len(entries))
-			for _, e := range entries {
-				addrs = append(addrs, net.JoinHostPort(e.Service.Address, strconv.Itoa(e.Service.Port)))
-			}
-			fn(addrs) // blocking query 返回 ≠ 有变更：可能只是 wait 超时
-		} else {
+		if err != nil {
 			time.Sleep(backoff)
+			continue
 		}
+		backoff = 500 * time.Millisecond // 成功一次就把退避清回去
+		addrs := make([]string, 0, len(entries))
+		for _, e := range entries {
+			addrs = append(addrs, net.JoinHostPort(e.Service.Address, strconv.Itoa(e.Service.Port)))
+		}
+		fn(addrs) // blocking query 返回 ≠ 有变更：可能只是 wait 超时
 	}
+	return ctx.Err()
 }
-```
-> 最后一行注释是新手最常踩的坑：**blocking query 的超时返回是正常路径，不是错误**。把「返回」当成「变更」会写出「每 5 分钟抖一次全量刷新」的客户端；把「超时」当成「错误」并立即重试，则会在服务端重启时制造惊群。
+```> 最后一行注释是新手最常踩的坑：**blocking query 的超时返回是正常路径，不是错误**。把「返回」当成「变更」会写出「每 5 分钟抖一次全量刷新」的客户端；把「超时」当成「错误」并立即重试，则会在服务端重启时制造惊群。
 
 ---
 
