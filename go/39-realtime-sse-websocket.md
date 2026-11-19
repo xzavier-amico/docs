@@ -706,7 +706,7 @@ WebSocket 这一点单独处理：连接已经被 hijack，`Shutdown` 管不到�
 - **eino**：把「流」做成一等公民，`schema.StreamReader[T]` 可以在图节点之间传递增量，你只需要在终点把它读出来转成 SSE 事件。想法比 langchaingo 激进得多，详见第 49 章。
 - **Kratos / Gin**：中间件里对 `text/event-stream` 要**跳过 response writer 的包装**（很多日志/压缩中间件会包一层 `ResponseWriter`，导致 `http.Flusher` 断言失败——用 `ResponseController` 就没这个问题，它会帮你穿透包装）。
 
-> 🩸 真实事故：某团队上了个「统一响应体」中间件，把 `ResponseWriter` 包成自定义类型且没实现 `Flush()`，结果所有 SSE 接口从「流式」退化成「一次性」，排查了两天。**教训：任何包装 `ResponseWriter` 的中间件，都必须转发 `Flush`/`Unwrap`，或者干脆用 `ResponseController`。**
+> **排查场景**：中间件包装 `ResponseWriter` 后，SSE 事件攒到请求结束才送达。先检查包装器是否保留刷新能力：对使用 `ResponseController` 的代码，可以通过 `Unwrap` 暴露底层；直接断言 `http.Flusher` 的代码需要包装器提供该接口。反向代理缓冲也应单独排查。
 
 ---
 

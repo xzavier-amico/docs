@@ -1,7 +1,7 @@
 # docs · AI Docs
 
-> 技术文档仓库：**Go 语言深水区 + AI-Agent 架构 + 算法思维训练**，面向有 Java 经验的程序员。
-> 讲语言内核 → 运行时 → 并发调度器源码 → 工程化 → Agent 架构 → 开源框架源码；另附 **LeetCode 高频 150 题 Java/Go 双解**，把「算法直觉」补成可迁移的思维模型。
+> 技术文档仓库：**Go 语言深水区 + AI-Agent 架构 + 计算机系统基座**，面向有 Java 经验的程序员。
+> 讲语言内核 → 运行时 → 并发调度器源码 → 工程化 → Agent 架构 → 开源框架源码；再从 bit 一路拆到 CPU、内核与协议栈，把「背过的定义」还原成物理约束的推论。
 
 | 目录 | 内容 | 状态 |
 | --- | --- | --- |
@@ -10,8 +10,11 @@
 | [`llm/`](llm/0-summary.md) | **《AgentOS 工程架构：从编排框架到生产级 Agent 平台》** — 10 部分 · 52 章 · 约 104 万字符：Agent-Client/Server 分离、事件溯源、队列调度、上下文工程、SKILL、MCP、RAG、前处理/流式/审计撤回/后处理、限流缓存降级、计费账本、沙盒、防御工程、合规审计、多 Agent、可观测与数据闭环、灰度、低代码装配 | ✅ 全部完稿（初稿） |
 | [`algo/`](algo/0-summary.md) | **《算法深水区：LeetCode 高频 150 题 · Java/Go 双解》** — 14 部分 · **150 章全部完成**（247.6 万字符 / 2,509 代码块 / 1,548 行表格）：双指针、前缀和差分、滑动窗口、二分与二分答案、排序/区间/TopK、哈希与数组原地、链表、栈与单调结构、树（遍历/BST/构造/树形 DP/Trie）、图（网格 BFS/拓扑/并查集/最短路/MST/欧拉路径）、回溯、动态规划（背包/序列/字符串/状态机/区间）、贪心、位运算与数学、矩阵与 KMP。每题含题面+链接、暴力→最优演进、正确性论证、ASCII 图解、**Java+Go 双实现**、同类题扩展（`<details>` 隐藏 hint） | ✅ 150 章 / 247.6 万字符 / 2,509 代码块 |
 | [`comp/`](comp/0-summary.md) | **《存储与中间件剖析：内核形态决定架构边界》** — 11 部分 · **53 篇全部完稿**：解剖卡八问 + 三本放大账、B+树/LSM/列存、WAL、InnoDB（页/MVCC/锁/三份日志/优化器/复制）+ PG 对照、Redis（单线程/编码/持久化/Cluster）+ 一致性哈希与 quorum、MongoDB/HBase/RocksDB+TiKV/ClickHouse、ES（倒排/段/分片/query vs filter/scroll/容量与重建）+ 向量索引与向量库、Kafka（日志/ISR/消费组）+ 消息族谱/任务队列/CDC/Flink/Iceberg/时间轮、ZK vs etcd/注册配置中心/网关入口/RPC/服务网格、S3/事务组件/连接池/分布式 ID/分布式锁/密钥/可观测底座、**Agent 栈（vLLM 推理引擎/LLM 网关/执行沙箱）**、组件故障谱与 53 张解剖卡合订 | ✅ 53/53 篇（01–53） |
+| [`base/`](base/0-summary.md) | **《计算机系统基座：从 bit 到内核到协议栈》** — 位与字节、CPU/GPU、Linux 内核、网络协议、DNS 安全与应用层认证。含 11 篇实例剖析、[三层账本与 100 题自检](base/56-closing-ledger.md) | 56/56 篇初稿齐备 |
 | [`architect/`](architect/0-summary.md) | **《系统设计实战：从约束到形态到真实系统》** — 4 部分 · 26 篇：Part I 基础（约束卡、领域建模、存储与索引形态、读写路径、演进纪律 6 篇）、Part II 空白横切（变更治理、风控反作弊、开放平台、多活单元化、数据闭环 5 篇）、Part III 案例（短链、IM 扇出推送、千万长连接、消息存储 vs Telegram、多模式匹配、搜索、向量、推荐、数据迁移、埋点管道、活动奖励、秒杀库存、多租户底座、分片上传 14 篇）、Part IV 收口。每篇死磕一个「唯一真问题」，含事故引子、量级推导、L0→L5 换挡信号表、十分钟答题卡 | ✅ 26 篇 / 71.2 万字符全部完稿（初稿） |
 ## 快速进入
+
+**编辑约定**：技术正文以客观叙述为主，不保留写作过程、对话式称呼或作者身份自述，也不虚构作者。数值注明来源、环境与口径；实测、规范、估算和教学案例明确区分，未核实的结论不写成事实。
 
 - **总纲（先读）**：[`go/0-summary.md`](go/0-summary.md) —— 54 章清单、Java↔Go 对照速查表、阅读路线、里程碑
 - **第一章**：[`go/1-mindset-shift.md`](go/1-mindset-shift.md) —— 心智模型重置（金标准风格样板）
@@ -27,6 +30,7 @@
 - 🧠 **算法思维训练**：[`algo/0-summary.md`](algo/0-summary.md)（150 章：14 部分 · 双指针/二分/DP/图/回溯/贪心，Java+Go 双解）
 - 🏛️ **系统设计实战**：[`architect/0-summary.md`](architect/0-summary.md)（26 篇：约束→形态→14 个真实系统，短链/IM/检索/推荐/迁移/秒杀/多租户）· [合订本总目](architect/0-compiled.md)
 - 🧩 **组件剖析**：[`comp/0-summary.md`](comp/0-summary.md)（53 篇全齐：ES/MySQL/Redis/MongoDB/HBase/RocksDB·TiKV/ClickHouse/Kafka·RocketMQ·Pulsar/CDC/Flink/Iceberg/ZK·etcd/Nacos/S3/事务组件/分布式锁/密钥/可观测/vLLM/LLM 网关/沙箱 —— 内核形态如何决定架构边界）
+- 🧱 **计算机系统基座**：[`base/0-summary.md`](base/0-summary.md)（56 篇初稿，含 11 篇实例、[跨层账本与 100 题自检](base/56-closing-ledger.md)）
 
 ## 各套文档的关系
 

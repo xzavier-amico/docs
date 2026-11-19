@@ -5,12 +5,12 @@ hide:
 
 # AI Docs
 
-> 技术文档仓库：**Go 语言深水区 + AI-Agent 架构 + 算法思维训练**，面向有 Java 经验的程序员。
-> 讲语言内核 → 运行时 → 并发调度器源码 → 工程化 → Agent 架构 → 开源框架源码；另附 **LeetCode 高频 150 题 Java/Go 双解**。
+> 技术文档仓库：**Go 语言深水区 + AI-Agent 架构 + 计算机系统基座**，面向有 Java 经验的程序员。
+> 讲语言内核 → 运行时 → 并发调度器源码 → 工程化 → Agent 架构 → 开源框架源码；再从 bit 一路拆到 CPU、内核与协议栈，把「背过的定义」还原成物理约束的推论。
 
 本站按系列展示正文，每套都从第 1 章开始。
 
-## 六套文档
+## 七套文档
 
 | 系列 | 内容 | 规模 | 开始阅读 |
 | --- | --- | --- | --- |
@@ -20,11 +20,12 @@ hide:
 | **算法深水区** | LeetCode 高频 150 题，Java + Go 双解；暴力→最优演进、正确性论证、ASCII 图解 | 150 章 / 247.6 万字符 | [第 1 题 · Two Sum](algo/001-two-sum.md) |
 | **系统设计实战** | 从约束卡到真实系统：短链、IM、长连接、检索、推荐、迁移、秒杀、多租户 | 26 篇 / 71.2 万字符 | [第 1 篇 · 约束卡与容量](architect/01-constraint-card-and-capacity.md) |
 | **存储与中间件剖析** | InnoDB、PostgreSQL、Redis、MongoDB、HBase、RocksDB/TiKV、ClickHouse、ES、Kafka、vLLM | 53 篇规划 / 20 篇正文 | [第 1 篇 · 组件解剖方法](comp/01-component-anatomy-method.md) |
+| **计算机系统基座** | 从位与字节到 CPU/GPU、Linux 内核和网络协议；含 RingBuffer、GEMM、DNS 安全、TLS 与 HTTP/2 等机制与实例 | 56 篇初稿 / 11 篇实例 | [导读](base/01-one-ruler.md) · [收口与自检](base/56-closing-ledger.md) |
 
 ## 阅读方式
 
 - **按系列顺序读**：从上面任意一套的第 1 章开始，侧栏会按章节顺序展开。
 - **按主题跳读**：每章开头都有「本章定位」和「读法」，先看这两段再决定是否继续。
-- **按岗位选路线**：`go/` 打语言与运行时地基，`llm/` 建平台架构，`eng/` 练功能实现，`algo/` 补算法直觉，`architect/` 学系统装配，`comp/` 拆组件内核。
+- **按岗位选路线**：`go/` 打语言与运行时地基，`llm/` 建平台架构，`eng/` 练功能实现，`algo/` 补算法直觉，`architect/` 学系统装配，`comp/` 拆组件内核，`base/` 补机器本身的物理底座（位、CPU、内核、协议栈）。
 
 > 站点由 GitHub Actions 自动构建，每次 push 到 `main` 后自动更新。
