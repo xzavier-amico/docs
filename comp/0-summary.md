@@ -372,15 +372,15 @@ bash comp/progress.sh
 | 部分 | 篇数 | 状态 |
 | --- | --- | --- |
 | 总纲 | 1 | ✅ |
-| **已完稿正文** | **37 / 53** | 🚧 第六批：Part VI 收官（消息、流与定时全齐） |
+| **已完稿正文** | **40 / 53** | 🚧 第七批：Part VII 收官 + 入口开篇 |
 | Part I 地基 | 4 | ✅ 4/4（01–04） |
 | Part II 关系库与事务内核 | 7 | ✅ 7/7（05–11） |
 | Part III 内存与无主 KV | 5 | ✅ 5/5（12–16） |
 | Part IV LSM 族与分析 | 4 | ✅ 4/4（17–20） |
 | Part V 检索与向量 | 7 | ✅ 7/7（21–27） |
 | Part VI 消息、流与定时 | 9 | ✅ 9/9（28–36） |
-| Part VII 协调、注册与配置 | 2 | 📝 待开写 |
-| Part VIII 入口与通信 | 3 | 📝 待开写 |
+| Part VII 协调、注册与配置 | 2 | ✅ 2/2（37–38） |
+| Part VIII 入口与通信 | 3 | 🚧 1/3（39 已完稿） |
 | Part IX 横切基础件 | 7 | 📝 待开写 |
 | Part X Agent 栈 | 3 | 🚧 1/3（49 已完稿） |
 | Part XI 收口 | 2 | 📝 待开写 |
@@ -423,9 +423,9 @@ bash comp/progress.sh
 - [x] 34 Flink：checkpoint、watermark、状态后端与背压
 - [x] 35 Iceberg / 表格式：快照、清单与 COW vs MOR
 - [x] 36 定时与延迟：时间轮、延迟队列与事务消息回查
-- [ ] 37 ZooKeeper vs etcd：ZAB、Raft、session 与 watch
-- [ ] 38 注册中心与配置中心：Nacos / Consul / Apollo
-- [ ] 39 入口网关与负载均衡：Nginx / Envoy / LVS
+- [x] 37 ZooKeeper vs etcd：ZAB、Raft、session 与 watch
+- [x] 38 注册中心与配置中心：Nacos / Consul / Apollo
+- [x] 39 入口网关与负载均衡：Nginx / Envoy / LVS
 - [ ] 40 RPC 与连接复用：gRPC(HTTP/2) / Dubbo
 - [ ] 41 服务网格与 xDS：sidecar 的账
 - [ ] 42 对象存储与云盘：S3 语义、multipart、限流与 IOPS 模型
