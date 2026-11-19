@@ -344,7 +344,7 @@ func reload(ctx context.Context, path string) error {
 
 ### 52.5.2 `GOMAXPROCS`：Go 1.25 的容器感知（以及 1.24 之前怎么办）
 
-Go 1.24 及以前，`runtime.GOMAXPROCS(0)` 默认等于 **`NumCPU`（宿主机的核数）**，`sched_getaffinity` 在容器里通常也不受 cpu quota 限制。于是：
+Go 1.24 及以前，未设置时默认使用进程启动时可用的逻辑 CPU 数（`NumCPU`），而 cgroup CPU 配额不等于 CPU affinity。下面假定进程可见节点的全部 32 个逻辑 CPU：
 
 ```
 节点 32 核，Pod limit = 1 核
@@ -353,12 +353,12 @@ Go 1.24 及以前，`runtime.GOMAXPROCS(0)` 默认等于 **`NumCPU`（宿主机�
    → 请求 P99 抖动，CPU 利用率看起来只有 20%
 ```
 
-Go 1.25 起，runtime 会把 **cgroup CPU quota 纳入 `GOMAXPROCS` 的默认值**（这就是「容器感知 GOMAXPROCS」）。按官方说明，这一行为在检测到容器 CPU 限制时默认启用，可用 `GODEBUG=containermaxprocs=0` 关掉；CPU limit 变化时是否动态更新由 `updatemaxprocs` 控制，默认不跟随。（`GODEBUG` 开关名与默认值随版本可能调整，以你本地的 release notes 为准。）
+Go 1.25 在 Linux 的新默认行为把逻辑 CPU 数、CPU affinity 和 cgroup CPU 配额纳入计算，并定期更新；分数配额向上取整，前两项均至少为 2 时，单靠配额不会让默认值降到 1。对语言版本 1.24 及更早的程序，`containermaxprocs` 和 `updatemaxprocs` 默认保留旧行为；显式设置 `GOMAXPROCS` 也会停用自动更新。见 [Go 1.25 runtime 文档](https://pkg.go.dev/runtime@go1.25.0#GOMAXPROCS)。
 
 那么三种情况：
 
 ```go
-// 情况 A：Go 1.25+，什么都不用做，默认就是对的。
+// 情况 A：确认启用了 Go 1.25 的默认行为，再核对运行时的实际值。
 //          只想确认值对不对，启动时打一行日志：
 slog.Info("runtime", "gomaxprocs", runtime.GOMAXPROCS(0), "numcpu", runtime.NumCPU())
 
@@ -1229,7 +1229,7 @@ spec:
 | `time/tzdata` | 一行 blank import 消灭所有时区问题 |
 | 三个账本 | 内存（limit ≥ GOMEMLIMIT/0.85）、CPU（limit ≈ GOMAXPROCS）、时间（grace ≥ preStop+Shutdown+20s） |
 | `GOMEMLIMIT` | 软限制、换 CPU 保内存；必须和 cgroup 硬墙一起设 |
-| Go 1.25 GOMAXPROCS | cgroup 感知，默认就对了；老版本用 automaxprocs |
+| Go 1.25 GOMAXPROCS | 默认可感知 cgroup，注意语言版本兼容、手动覆盖和最小值；检查实际值 |
 | 探针分工 | startup 管启动慢、readiness 管摘流量、liveness 只证明进程活着 |
 | 优雅关停接力 | 摘流量（preStop 延迟）→ SIGTERM → Shutdown → 关池 → flush → exit 0 |
 | 告警与复盘 | 只对 SLO 燃尽率告警、一个故障一条、每条链 runbook；复盘 KPI 是「同类事故不再发生」 |

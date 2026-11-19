@@ -1,7 +1,7 @@
 # 34. Flink：checkpoint、watermark、状态后端与背压
 
 > **状态**：`已完成（初稿）` ｜ **所属**：第六部分 · 消息、流与定时 ｜ **编号**：34 / 53
-> **本篇定位**：全仓唯一一处把「流处理的正确性到底由什么兑现」拆到**快照与时间线**这一层的篇目。Kafka 的日志形态与复制语义归 [comp/28](28-kafka-log-segments.md)、[comp/29](29-kafka-replication-isr.md)，本篇一个字不重写，只在需要时给一句结论加锚点；投递语义（至少一次 / 恰好一次的真实边界）归 [eng/24 投递语义](../eng/24-delivery-semantics.md)；管道拓扑与埋点口径归 `→ architect/11`、`→ architect/21`。它只回答一个问题：**「状态 + 对齐 checkpoint」为什么是流处理正确性的唯一来源，而 watermark 为什么是延迟与正确性之间那份必须有人签字的对赌合约**。读完它，checkpoint 会从「一个定时任务」变成一个带失效窗口的一致性协议，watermark 会从「一个时间参数」变成一条会被人为钉死的单调下界，背压会从「加内存」变成一个吞吐守恒的物理事实。
+> **本篇定位**：把流处理拆到**快照与时间线**这一层：一致性 checkpoint 怎样恢复状态，对齐与非对齐各把代价放在哪里，watermark 怎样决定事件时间窗口何时出结果。Kafka 复制见 [comp/29](29-kafka-replication-isr.md)，端到端投递边界见 [eng/24](../eng/24-delivery-semantics.md)。
 > **读法**：救火先读 §34.1 的三起事故（checkpoint 回滚循环、窗口永不触发、反压卡死对齐），再直接翻 §34.4 的 checkpoint 失败语义表、§34.5 的停滞三因表、§34.6 的「加内存为什么无效」表与 §34.10 的坑清单；做架构决策读 §34.4 的状态后端决策表与 §34.7 的 sink 语义决策表；要出容量与 SLO 方案直接抄 §34.8 的三本账（全部带乘法链、假设清单与量级结论标记）。只想知道结论的读 §34.12。
 
 ---
@@ -77,12 +77,12 @@ Flink 的故障有一个统一形状：**Web UI 上作业是绿色的，`numReco
 
 ### 唯一真问题
 
-> **流处理的正确性靠「状态 + 对齐 checkpoint」兑现，而延迟与正确性在 watermark 上直接对赌——watermark 每往前推一秒，结果就更早、也更可能错；每往后压一秒，结果更对、也更慢。这条线不是参数，是你要签字的口径。**
+> **一致性恢复靠状态与输入进度处在同一个一致性切面；对齐和记录在途数据是两种构造方式。** watermark 则表达事件时间推进的估计，影响窗口延迟和迟到处理；这与是否能一致地恢复是两件事。
 
 四条推论，全篇都在给它们找证据：
 
 1. **状态是本地内存/本地盘里的东西，不是数据库里的东西。** 所以必须被快照，而快照的代价由「key 数 × 每 key 状态」直接决定，与「业务多复杂」无关。
-2. **checkpoint 是一个一致性协议，不是定时任务。** 注入 barrier、对齐、异步快照三环中任一环被反压拖住，快照不是「慢一点」而是「失败」；失败在默认配置下直接触发 failover。
+2. **checkpoint 是一个一致性协议，不是定时任务。** 对齐快照可能在 barrier 等待阶段超时；非对齐快照会记录在途数据，仍可能因上传或其他阶段超过限时而失败。失败是否导致重启要看失败种类和容忍设置。
 3. **watermark 是 min，不是 max。** 全局事件时间由最慢的输入决定，**一个空闲分区就能让整条链路的时间停住**，而且不报错。
 4. **反压是吞吐守恒的表现，不是内存不足。** buffer 只决定「能在哪里堆多久」，而反压会直接卡住 checkpoint 的对齐阶段（§34.6 的核心因果）。
 
@@ -225,7 +225,7 @@ Flink 的 checkpoint 是 Chandy–Lamport 快照在数据流上的实现：JobMa
                     对齐窗口 = max(各输入 barrier 到达时间) − min(...)
                     ★ 反压时这个窗口可以到分钟级（§34.6）
 
-  对齐完成 ⇒ 状态快照（异步，不阻塞数据流）+ 上传 ⇒ 转发 barrier
+  对齐完成 ⇒ 捕获本地快照并转发 barrier；持久化可异步进行，不等上传完成才转发
 
 【非对齐式 checkpoint（unaligned，1.11+）】
   输入 1: ──d1─d2─d3─d4─d5─┃────►   barrier 直接「超车」：不暂停输入，不等待对齐
@@ -256,8 +256,8 @@ Flink 的 checkpoint 是 Chandy–Lamport 快照在数据流上的实现：JobMa
 | `execution.checkpointing.min-pause` | 两次之间的最小间隔 | 给上传留出喘息 | 实际间隔 = `interval + 快照时长` 的下界被抬高 | 稳态时长的 0.2–0.5 倍 |
 | `execution.checkpointing.max-concurrent-checkpoints` | 同时能跑几个快照 | 大状态下减少「跳过」 | 带宽翻倍、恢复点选择变复杂 | 大状态（>100 GB）用 1；小状态可用 2 |
 | `execution.checkpointing.tolerable-failed-checkpoints` | 连续失败几次才 failover | 抖动不再触发回滚 | **真故障显得像「只是慢」**，恢复点越拖越旧 | **默认 0 太脆**；生产设 2–3，且必须配「失败数」告警 |
-| `execution.checkpointing.mode` | 对齐（`EXACTLY_ONCE`）还是跳过对齐（`AT_LEAST_ONCE`） | `AT_LEAST_ONCE` 不对齐 ⇒ 快 | 恢复后会有重复输出（下游必须幂等） | 只有下游幂等时才降级 |
-| `execution.checkpointing.unaligned` | barrier 是否超车 | 反压时对齐时间 ≈ 0 | 快照体积 = 状态 + 在途数据；恢复更慢 | 反压常态化且状态小时打开 |
+| `execution.checkpointing.mode` | 算子状态恢复语义：`EXACTLY_ONCE` 或 `AT_LEAST_ONCE` | `AT_LEAST_ONCE` 可省对齐，但恢复时可能重复处理 | 下游幂等不自动修复算子状态的重复累加 | 不用它替代 exactly-once 的非对齐快照 |
+| `execution.checkpointing.unaligned.enabled` | 在 `EXACTLY_ONCE` 下允许 barrier 超车并记录在途数据 | 反压时减少对齐等待 | 快照额外占用存储，恢复需处理 channel state | Flink 1.20 要求最大并发 checkpoint 数为 1；实测收益和恢复时长 |
 | `execution.checkpointing.externalized-checkpoint-retention` | 取消作业时是否保留快照 | 可回到任意历史点 | 存储增长没人回收 | `RETAIN_ON_CANCELLATION`（配合 savepoint 目录生命周期） |
 
 ### 状态后端决策表：HashMap 还是 RocksDB
@@ -300,7 +300,7 @@ conf.setString("execution.checkpointing.max-concurrent-checkpoints", "1");
 conf.setString("execution.checkpointing.tolerable-failed-checkpoints", "3"); // 默认 0，务必显式
 // ③ 对齐方式
 conf.setString("execution.checkpointing.mode", "EXACTLY_ONCE");
-conf.setString("execution.checkpointing.unaligned", "false");
+conf.setString("execution.checkpointing.unaligned.enabled", "false");
 // ④ 重启策略：没有它，checkpoint 失败会直接让作业退出
 conf.setString("restart-strategy.type", "fixed-delay");
 conf.setString("restart-strategy.fixed-delay.attempts", "5");
@@ -673,7 +673,7 @@ curl -s "localhost:8081/jobs/$JOB/vertices" \
 | 记什么 | 具体结论 |
 | --- | --- |
 | 物理形态一句话 | 分布式流运行时 = **JobManager（调度 + 触发快照）+ TaskManager（slot 里跑 operator chain）+ 网络缓冲池（固定字节）+ 本地状态（RocksDB/堆）** |
-| checkpoint 是什么 | 不是「拍照」，是 **barrier 注入 + 对齐 + 异步快照** 的 Chandy–Lamport 协议；完成回调才触发 sink 提交 |
+| checkpoint 是什么 | barrier 划定一致性切面：可对齐等待，也可在非对齐模式下把在途数据计入快照；事务型 sink 按连接器约定在 checkpoint 完成后提交 |
 | 三本账（一行版） | ① 状态 = key 数 × 每 key × LSM 开销 × 版本；② 快照时长 = 状态 ÷ 上传带宽 **+ 对齐等待**；③ 恢复 = 状态恢复 **+ 回退窗口 × 速率比** |
 | 状态后端 | 堆内（HashMap）受堆限、快照要全量序列化；RocksDB 受盘限、可增量硬链接。**状态 > 数 GB 一律 RocksDB** |
 | checkpoint 失败语义 | 默认 `tolerable-failed-checkpoints=0` ⇒ **一次抖动 = 一次 failover**；参数必须显式设 |
@@ -686,7 +686,7 @@ curl -s "localhost:8081/jobs/$JOB/vertices" \
 | Kafka 事务三必须 | `transactional.id` 每 subtask 每 checkpoint 唯一；`transaction.timeout.ms` > interval + 快照时长；下游 `read_committed` |
 | 恢复公式 | `恢复时间 ≈ 状态恢复 + 回退窗口 × (生产速率 ÷ 重放速率)`；**调小 interval 是唯一能压回退窗口的旋钮，代价是带宽** |
 | 第一指标 | `lastCheckpointDuration / timeout` 的比值（提前 10 分钟）；第二指标是**逐 subtask 的反压** |
-| 一句话 | **正确性由「对齐 checkpoint」兑现，延迟由 watermark 定义，而这两者在反压面前会同时崩——因为它们共用同一条 channel。** |
+| 一句话 | **一致性快照可对齐或非对齐；端到端保证还取决于 source 与 sink，watermark 单独决定事件时间输出节奏。** |
 
 ---
 
@@ -751,9 +751,9 @@ curl -s "localhost:8081/jobs/$JOB/vertices" \
 
 ③ **Kafka 事务超时**：`transaction.timeout.ms` < `checkpoint interval + 快照时长` ⇒ broker 主动 abort 事务，Flink 恢复后重放那一段。确认：Kafka 事务日志里的 `AbortTransaction`、`transaction.timeout.ms` 与 interval 的比值。修：抬事务超时并加启动断言。
 
-④ **`execution.checkpointing.mode = AT_LEAST_ONCE`**（或开了 unaligned 后某条路径退化成至少一次）：不对齐 ⇒ 恢复后 barrier 之前的在途数据会被重放。确认：配置快照。修：回到 `EXACTLY_ONCE` 并治反压。
+④ **`execution.checkpointing.mode = AT_LEAST_ONCE`**：快照不提供 exactly-once 的算子状态语义，恢复可能重复处理。确认实际模式，必要时改回 `EXACTLY_ONCE`。不能把它与非对齐 exactly-once 混为一谈：后者把在途数据纳入快照，并未降级。见 [Flink 1.20 非对齐检查点](https://nightlies.apache.org/flink/flink-docs-release-1.20/docs/ops/state/checkpointing_under_backpressure/#unaligned-checkpoints)。
 
-**用三条件排除**：① source 可重放且位点在快照里（Kafka source 默认满足，但若用了 `setStartingOffsets` 的固定值就会破坏）；② sink 事务/幂等（逐一核 ①–④）；③ 位点与状态同快照（若用了外部存储存位点，就不是同快照）。**三者之外没有第四条路**——「Flink 保证恰好一次」这句话本身就是三者的简写。
+**用三条件排查**：① source 可重放，恢复时使用快照内的读取进度；Kafka Source 的 `setStartingOffsets` 决定没有已恢复位点时的起点，不覆盖已恢复的分区状态。② sink 的事务或幂等契约覆盖实际副作用。③ 算子状态、输入进度，以及非对齐快照中的在途数据，共同定义恢复点。不要只看配置里有没有写 `EXACTLY_ONCE`。
 </details>
 
 **Q5.** 老板问：「我们的实时看板端到端延迟 90 秒，能不能压到 5 秒？」请把 90 秒拆成一条可复算的加法链，并说明压到 5 秒必须放弃什么。

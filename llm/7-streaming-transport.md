@@ -44,11 +44,11 @@
 | 方向 | 服务端→客户端单向（客户端用普通 POST 上行） | 全双工 | 服务端→客户端流（双向流需 bidi） | 伪推送 |
 | 浏览器原生 | ✅ `EventSource` 内建重连 + `Last-Event-ID` | ✅ 但需自己写重连/心跳 | ❌ 需 grpc-web + 代理支持 trailers | ✅ fetch 即可 |
 | 二进制 | ❌（只能 base64，多 33% 体积） | ✅ 帧原生支持 | ✅ protobuf | ❌ |
-| 断点续传 | ✅ **协议级**：重连自动带 `Last-Event-ID` | ❌ 全靠自己设计 resume 协议 | ❌ 流断了就是断了 | ⚠️ 靠 offset 参数自己实现 |
+| 断点续传 | 原生 `EventSource` 重连可回传非空 `Last-Event-ID`；应用实现回放 | 应用设计 resume 协议 | 应用设计游标与重放 | 应用用 offset 等实现 |
 | 穿反代/CDN | ⚠️ 要关 buffering，但 HTTP/1.1 就能跑 | ⚠️ 要 `Upgrade` 头透传，部分 WAF/企业代理直接掐 | ❌ h2 端到端，中间任何一跳降级就死 | ✅ 最兼容 |
 | 负载均衡 | ✅ 普通 L7 即可（每请求独立） | ⚠️ 有状态连接，需 sticky 或连接级路由 | ⚠️ 同 WS | ✅ |
 | 每连接成本 | 低（一个 HTTP 请求） | 中（握手 + 帧解析 + 心跳） | 中高（HTTP/2 流） | 高（反复建连） |
-| 中断恢复语义 | **天然幂等**（按 seq 续） | 需要自己造 | 无 | 需要自己造 |
+| 中断恢复语义 | 应用定义 seq、缺口处理和去重；游标不是业务 ACK | 需要自己造 | 需要自己造 | 需要自己造 |
 | 适用场景 | **单向 token 流（90% 的 Agent 场景）** | 打断/审批/语音/协同编辑 | **服务间**（Gateway↔Worker） | 老网关兜底、极简客户端 |
 
 **Aurora 的结论（也是我给绝大多数团队的建议）**：
@@ -62,7 +62,7 @@ WebSocket               → 只在「真双向」场景开：语音实时对话�
 
 为什么「SSE + POST 控制通道」比「一把梭 WebSocket」好？因为**单向流和双向控制是两种完全不同的失败模式**，混在一条连接上会互相污染：
 
-- SSE 断了 → 浏览器自动重连、自动带 `Last-Event-ID`、自动续传，你什么都不用做；
+- SSE 断了 → 符合重连条件时，原生 `EventSource` 会重连，并发送已记录的非空 `Last-Event-ID`。服务端仍须保留事件、按游标回放，超出保留范围时明确给出缺口或快照；客户端按业务需要去重或维护已应用游标。手写 `fetch` 客户端不自动继承 `EventSource` 的行为。见 [WHATWG SSE](https://html.spec.whatwg.org/multipage/server-sent-events.html#the-last-event-id-header)；
 - 控制指令（取消 / 审批 / 打断）走 POST → 天然有 HTTP 状态码、天然可重试、天然可审计、天然能被网关限流。
 
 而 WebSocket 一把梭的话：连接断了你不知道「取消指令到底发出去没有」；审批回传要靠你自己造一套 request/response 关联 ID；WAF 掐了连接你连错误码都拿不到。

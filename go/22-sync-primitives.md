@@ -370,7 +370,11 @@ func main() {
 
 跑一遍你会看到 `42` 然后 `-1`。这就是"`sync.Pool` 是 GC 的减压阀，不是缓存"的可执行证明。
 
-### 22.3.6 sync.Map：read / dirty / amended
+### 22.3.6 sync.Map：Go 1.24 起默认使用 HashTrieMap
+
+本书的目标版本 Go 1.24–1.25 默认通过 `internal/sync.HashTrieMap` 实现 `sync.Map`。哈希按一段段索引定位树节点；读路径读取原子指针，修改在相应节点上同步。不再使用全局 `read` / `dirty` 的快照轮换。API 没变：`Range` 不提供一致快照，也没有 `Len()`。见 [Go 1.24 发布说明](https://go.dev/doc/go1.24#syncpkg)及 [1.24.0 实现](https://github.com/golang/go/blob/go1.24.0/src/sync/hashtriemap.go)。
+
+**历史对照（Go 1.23 及更早）**：旧实现才使用下图的 `read`、`dirty` 与 `misses`。以下是字段摘录与路径示意，不是当前源码。
 
 ```go
 // src/sync/map.go
@@ -397,10 +401,10 @@ type readOnly struct {
         未命中 → 加锁 → 写 dirty；如果 read 里没有这个 key，amended = true
 
 提升：misses 累计到 >= len(dirty) → 加锁，read = readOnly{m: dirty}, dirty = nil, amended=false
-      提升时会把"已被删除"的 entry（p == nil 的墓碑）直接过滤掉
+      提升直接转用 dirty；构建 dirty 的时候才会跳过不再有效的旧条目
 ```
 
-`sync.Map` 的定位非常窄：**key 集合基本稳定（写一次读多次）、或者每个 goroutine 只碰自己的 key（不相交）**。这两个场景下它比 `RWMutex + map` 快；其它场景（频繁增删、需要 `len`、需要遍历一致性快照）应该老老实实 `Mutex + map`。它连 `Len()` 都没有（只能遍历数），这就是"不是通用 Map"的自白。
+`sync.Map` 的典型用法是**每个 key 写一次读多次**，或各 goroutine 多操作互不相交的 key。是否比 `RWMutex + map` 快要用目标版本、数据规模和热点分布实测；需要成组维护多个键的不变量或一致性快照时，优先用受同一锁保护的普通 `map`。
 
 ### 22.3.7 typed atomic（1.19）与弱内存序
 
@@ -496,7 +500,7 @@ func (r *Registry) Update(c *Config) { r.cur.Store(c) } // 只由单 goroutine �
 | `WaitGroup` | 一个 `atomic.Uint64` 装 counter + waiter；`Done` happens-before `Wait` 返回 |
 | `Once` | 快路径一次 `atomic.Load`；失败不重试；自带 happens-before |
 | `sync.Pool` | per-P `private` + `shared` + `victim`；每次 GC 降级，两轮后清空；**不是缓存** |
-| `sync.Map` | read（无锁）+ dirty（锁内）+ misses 提升；只适合读多写少/不相交 key |
+| `sync.Map` | Go 1.24 起默认 HashTrieMap；典型用法是写一次读多次或不相交的 key |
 | `atomic` | 1.19 起有 `Int64`/`Bool`/`Pointer[T]` 等类型；**顺序一致**，语义等同 Java `volatile` |
 
 ---
@@ -507,7 +511,7 @@ func (r *Registry) Update(c *Config) { r.cur.Store(c) } // 只由单 goroutine �
    > 要点：正常模式下被唤醒的 waiter 要和"正在 CPU 上跑的新 goroutine"竞争，可能反复失败（源码注释：woken up waiter has good chances of losing），极端情况尾延迟无限拉长。等超过 `starvationThresholdNs`（1e6 ns = 1ms）就把锁切成 starvation，之后 `Unlock` 直接用 `Semrelease(handoff=true)` 交接所有权 + 让出时间片，且新来者不许抢、不许自旋。代价是吞吐下降、上下文切换变多，所以一旦"我是队里最后一个或被等时间 < 1ms"就立刻退回正常模式。
 
 2. **你的服务里有个 `map[string]*Session`，读远多于写，key 集合基本固定。选 `Mutex+map`、`RWMutex+map` 还是 `sync.Map`？为什么 sync.Map 不能当通用 Map 用？**
-   > 要点：key 集合稳定 + 读多写少正是 `sync.Map` 的目标场景（read 快照无锁命中）。但它没有 `Len()`、遍历不保证一致快照、频繁插入新 key 会让 `misses` 不断触发 dirty 提升（提升要加锁 + 复制），删除还留有墓碑；所以频繁增删或需要一致性遍历时应该用 `RWMutex + map` 或加锁的 `map`。
+   > 要点：写一次读多次是 `sync.Map` 的典型场景；它没有 `Len()`，遍历不保证一致快照。需要一致性遍历或多键不变量时考虑加锁的 `map`；频繁增删的性能请按目标版本测试，不能用旧版 `misses` 推断新版表现。
 
 3. **为什么说 `sync.Pool` 是"GC 的减压阀"而不是缓存？对象在里面最多活多久？**
    > 要点：`Get` 可能走 `New`（因为 GC 的 `poolCleanup` 会清 `victim` 并把 `local` 降级为 `victim`），`-race` 下 `Put` 甚至按 1/4 概率直接丢弃。对象最多活过两次 GC：第一次 GC 从 `local` 降到 `victim`，第二次 GC `victim` 被置 nil。所以只能存"可重建、丢了不亏"的临时对象（buffer、编码器状态），不能存业务缓存或连接。
@@ -519,7 +523,7 @@ func (r *Registry) Update(c *Config) { r.cur.Store(c) } // 只由单 goroutine �
 - `$GOROOT/src/internal/sync/mutex.go`、`rwmutex.go`、`waitgroup.go`、`once.go`（Go 1.24 起；1.23 及更早在 `$GOROOT/src/sync/`）—— 尤其 `Mutex fairness` 那段注释，本章 22.2 的图就是它的翻译
 - `$GOROOT/src/runtime/sema.go` —— `semacquire1` / `semrelease1` / `semaRoot`（treap）
 - `$GOROOT/src/sync/pool.go` —— `getSlow` 的 6 级查找顺序与 `poolCleanup`
-- `$GOROOT/src/sync/map.go` —— `readOnly` / `amended` / `dirtyLocked`
+- Go 1.24 起查看 `$GOROOT/src/sync/hashtriemap.go` 和 `$GOROOT/src/internal/sync/hashtriemap.go`；旧版的 `readOnly` / `dirtyLocked` 仅供历史对照。
 - `$GOROOT/src/sync/atomic/doc.go` —— 内存序承诺与 1.19 新增类型的说明
 - Dmitry Vyukov 的 *Scalable Go Scheduler Design* 与 `sync.Mutex` 饥饿模式的 issue（golang/go#13086）—— 1ms 这个数字的来历
 

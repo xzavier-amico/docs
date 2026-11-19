@@ -99,7 +99,7 @@
                     └──超过上限──► 人工队列 + 告警（不删除）
 ```
 
-**顺序只保证到 aggregate 级**：同一 `aggregate_id`（订单号、账户号、`run_id`）进同一分区，消费者按 `aggregate_version` 拒绝旧版本；不同聚合之间不保证全局顺序，也不需要。
+**分区顺序不等于业务版本顺序**：相同 `aggregate_id`（订单号、账户号、`run_id`）在路由稳定时进入同一分区，Kafka 只保留写入分区的先后。如果需要按 `aggregate_version` 应用事件，要让投递端避免跳号，或让消费端可靠暂存后序事件并补齐缺口。丢弃旧版本不是补齐策略。
 
 ---
 
@@ -192,7 +192,7 @@ public void relayOnce() {
 ```
 
 ```sql
--- 锁一批待投递事件；SKIP LOCKED 让多个 relay 实例互不阻塞
+-- 只适用于允许到达乱序的投递：被锁住或正在退避的前序版本可能被跳过
 SELECT *
   FROM outbox_event
  WHERE status IN ('NEW','FAILED')
@@ -303,7 +303,7 @@ rocketMQTemplate.sendMessageInTransaction(
 | 投递延迟 | 200ms~2s（可调） | 10~100ms | 10~100ms |
 | 对 DB 压力 | 周期查询 + 行锁 | 读 binlog，几乎不碰业务表 | 半消息 + 回查 |
 | 运维复杂度 | 低（一个定时任务） | 高（Kafka Connect、binlog、位点） | 中（MQ 集群 + 回查） |
-| 顺序保证 | 按 id 顺序；多实例需按聚合分片 | 按 Kafka key 分区 | 按 MessageQueue 选择 |
+| 顺序边界 | `ORDER BY id` 只影响选批；跳锁和退避都可使后序先发 | 同 key 只保分区追加顺序；另验证变更的源顺序和投递方式 | 同队列不自动修正已经乱序的发送 |
 | 重复投递 | 有（发成功标记失败） | 有（Connector 重启） | 有（回查/重投） |
 | 适用 | 中小流量、已有 MySQL | 大流量、低延迟、已有 Kafka | 已用 RocketMQ、单 MQ |
 | 主要坑 | 长事务锁行、表膨胀 | 权限/位点/schema 变更 | 回查不准、半消息堆积 |
@@ -357,10 +357,10 @@ ALTER TABLE inventory_flow
 UPDATE orders
    SET status='PAID', paid_at=NOW(3)
  WHERE order_no='SO202506180001' AND status='CREATED';
--- 影响 0 行 = 已经处理过，直接返回成功
+-- 影响 0 行还可能是订单不存在、前序未应用或状态冲突；核对后才能当成重复
 ```
 
-**顺序**：按 `aggregate_id` 分区；消费者记录 `last_version`，只处理 `version = last_version + 1`，旧版本直接丢弃；跳号则进重试/人工，不能盲目覆盖。**不要追求全局顺序**——全局顺序 = 单分区 = 吞吐天花板。
+**顺序**：上述轮询器不保证业务版本顺序。即使只有一个 relay，v1 正在退避时也可能先发送可领取的 v2。若投递端负责保序，应对每个聚合串行认领，并让后序版本等待前序发送确认（失败或人工挂起时仍保留这个屏障）；不同聚合可以并行。若消费端负责保序，且版本对该订阅确实连续，可在同一事务中记录应用效果与 `last_version`，已经应用的版本去重，高于期望版本的事件先持久化暂存，再继续消费或从可信来源补齐缺失版本，最后按序应用。不要阻塞分区等一个可能排在当前消息后面的前序事件。长期缺口告警并转人工，不能静默跳过。见 [MySQL 锁定读](https://dev.mysql.com/doc/refman/8.0/en/innodb-locking-reads.html#innodb-locking-reads-nowait-skip-locked)和 [Kafka 分区顺序](https://kafka.apache.org/43/getting-started/introduction/#main-concepts-and-terminology)。
 
 ### 10.4.8 清理与归档：不清理的 Outbox 一定会炸
 
@@ -493,7 +493,7 @@ kubectl exec -it deploy/outbox-relay -- kill -9 1
 
 **② 灌重复**：把同一 `event_id` 人为重投 100 次，断言库存只扣一次、积分只加一次。
 
-**③ 顺序测试**：同一 `aggregate_id` 并发发 1,000 条版本号递增的事件，消费者最终 `last_version=1000`，且没有旧版本覆盖新版本。
+**③ 顺序测试**：同一 `aggregate_id` 的 v1 被锁或进入退避，故意让 v2 先可用。投递端保序时断言不会先发布 v2；消费端保序时断言 v2 先落暂存，v1 到达后按序各应用一次。大样本还应验证每个版本都按序应用，不只看最终 `last_version=1000`。
 
 **④ 积压与延迟 SQL**：
 
@@ -553,7 +553,7 @@ SELECT id, event_type, retry_count, last_error
 | 表结构 | `event_id` 唯一、`aggregate_id` 分区、`aggregate_version` 防旧、`status/retry/next_retry_at` 可运维 |
 | 投递器 | 轮询（简单）、CDC（低延迟）、事务消息（RocketMQ）三选一 |
 | 与 MQ 关系 | **不冲突**：Outbox 替代「事务里直接发 MQ」，不替代 MQ 的 fan-out/缓冲/重放 |
-| 顺序 | 只保证 aggregate 级；按 `aggregate_id` 分区，消费者拒绝旧版本 |
+| 顺序 | 同分区按追加顺序；业务版本靠投递端保序或消费端暂存、补齐与去重 |
 | 清理 | 只删 `SENT` 且超过保留期；`NEW/FAILED` 永不删；批量 + 归档 |
 | Agent 侧 | 完全相同；`run_id` 做聚合根，payload 带 token/成本/模型版本；Outbox ≠ 检查点 |
 | 不做会怎样 | 提交成功消息丢 → 下游永远不知道；表不清理 → 三个月后拖垮库 |
@@ -572,7 +572,7 @@ SELECT id, event_type, retry_count, last_error
 
 3. **同一订单的两条事件被并发投递，消费者先收到 `order.paid` 再收到 `order.created`，会出什么问题？怎么防？**
    <details><summary>答案要点</summary>
-   可能把未创建的订单标记为已支付，或覆盖状态。防法：按 `aggregate_id` 进同一分区保证顺序；事件带 `aggregate_version`，消费者只接受 `version = last_version + 1`，旧版本/跳号进重试或人工；状态机用条件更新（`WHERE status='CREATED'`）兜底。
+   可能把未创建的订单标记为已支付，或覆盖状态。同 key 同分区不修复先发的 v2；需要按 §10.4.7 防止跳号投递，或暂存并补齐 v1，确认前序状态后再应用 v2。条件更新是兜底，更新零行不自行证明事件已处理成功。
    </details>
 
 ## 10.11 延伸阅读

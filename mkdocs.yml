@@ -59,6 +59,7 @@ markdown_extensions:
 
 exclude_docs: |
   README.md
+  AUDIT.md
   *.sh
   mkdocs.yml
   requirements.txt

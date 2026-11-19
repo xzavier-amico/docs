@@ -325,8 +325,12 @@ SELECT merchant_id,
 
 **第二步：明细比对（分片并行）**
 
+下面的 `LEFT JOIN ... IS NULL` 依赖 `join_use_nulls=1`；在执行查询的同一会话设置，或对所有执行账户强制使用下文的 `recon` profile。
+
 ```sql
 -- 分片键：物化列 shard = cityHash64(biz_no) % 64；每个分片独立跑，互不依赖
+SET join_use_nulls = 1;
+
 -- ① 短款（漏记）：业务有、渠道无
 SELECT b.biz_no, 'SHORT' AS diff_type, b.amount AS biz_amount,
        CAST(NULL AS Nullable(Decimal(18,2))) AS channel_amount,
@@ -587,7 +591,7 @@ SELECT 'channel', count()
 </profiles>
 ```
 
-**`join_use_nulls` 这个参数值 0 和 1 的差别，是「几百条差异」和「几百万条假差异」的差别**：默认值 0 时，`LEFT JOIN` 未匹配的右表列会填 `0`/`''` 而不是 `NULL`，于是 `b.amount != c.amount` 对每一笔「渠道无记录」都成立——你会得到一堆 `AMOUNT_MISMATCH`，把真正的短款埋在噪音里。**要么显式设 `join_use_nulls=1`，要么一律用 `c.biz_no IS NULL` 判存在性，不要依赖列值。**
+**`join_use_nulls=1` 是前面两条 `LEFT JOIN ... IS NULL` 的前提。** 默认值 0 时，未匹配一侧的非 Nullable `String` 键填空串。因此示例会漏掉 `SHORT`/`LONG`，而 `INNER JOIN` 的金额差分支根本不会看到这些行。若不用 NULL 填充，可用双向 `LEFT ANTI JOIN` 直接找缺失记录，先核对所用版本与 JOIN 算法是否支持。不论哪种写法，都用「仅业务侧存在／仅渠道侧存在／两侧都存在但金额不同」三条样本验收。见 [ClickHouse JOIN 的未匹配列规则](https://clickhouse.com/docs/sql-reference/statements/select/join#processing-of-empty-or-null-cells)。
 
 **为什么不用 `FULL OUTER JOIN` 一把梭**：它要求两侧都进内存（或落磁盘），10 亿 × 10 亿会直接触发 `max_bytes_in_join` 限制；而三次 `LEFT/INNER JOIN` 可以分别下推过滤、分别限流、分别重试。**分片 + UNION ALL 的本质是把「一个大 join」换成「N 个小 join」，每个小 join 都能独立失败、独立重跑。**
 

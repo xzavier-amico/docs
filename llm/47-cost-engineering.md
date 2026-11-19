@@ -61,48 +61,49 @@ CTO 把平台组叫来，三个小时后查清了原因。**不是模型涨价�
 | 中模型 | 0.80 | 0.08 | 3.20 | 常规工具决策 |
 | 小模型（快） | 0.15 | 0.015 | 0.60 | 意图识别、改写、摘要、判定 |
 
-> 💡 缓存折扣的量级：Anthropic 的 prompt cache 命中输入约按 **0.1×** 计费、写入按 **1.25×**；OpenAI 的自动 prompt caching 对命中部分通常给 **5 折**左右。差异很大，**必须按厂商分别建模**，别用一个「八折」糊过去。
+> 💡 [Anthropic 的缓存计价](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)按读、写和有效期拆分；例如 5 分钟缓存写入为普通输入的 **1.25×**，不是在普通价之外再收 1.25×。其他厂商与模型有自己的档位；按实际计价表归类。
 
 **单次 Run 成本**：
 
 ```
-C_run = Σ_{i=1..N} [ (T_in,i − T_hit,i) × p_in(model_i)
-                   +  T_hit,i        × p_cache(model_i)
-                   +  T_out,i        × p_out(model_i) ]
+C_run = Σ_{i=1..N} [ T_normal,i × p_in(model_i)
+                   + T_read,i   × p_cache_read(model_i)
+                   + T_write,i  × p_cache_write(model_i)
+                   + T_out,i    × p_out(model_i) ]
       + Σ_j C_tool_j
       + C_infra_run
 ```
 
-- `T_in,i` / `T_hit,i` / `T_out,i`：第 i 次调用的输入、其中命中缓存的部分、输出 token
+- 普通输入、缓存读取和缓存写入是互斥的计费桶。若 `T_in` 是包含三类的总输入，`T_normal = T_in − T_read − T_write`；若厂商已拆桶，就直接映射。若输出另有独立计价的桶，也先拆成互斥类别再求和，不把输出的明细字段重复计费。
 - `C_tool_j`：第 j 次工具调用的外部成本（三方 API 按次计费、沙盒按秒计费）
 - `C_infra_run`：CPU/内存/带宽/存储/向量检索按 Run 摊销的基础设施成本
 
-Aurora 一次客服 Run（5 次模型调用 + 3 次工具，平均 30 秒、输出 800 字 ≈ 1.2k token）的实测拆解：
+Aurora 的一次客服 Run 示意（5 次模型调用 + 3 次工具，表中未发生单独计价的缓存写入；`T_in` 包含命中的输入）：
 
 | # | 步骤 | 模型档 | T_in | 其中缓存 | T_out | 成本 |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 意图识别 + 路由 | 小 | 1,800 | 1,500 | 60 | $0.00010 |
+| 1 | 意图识别 + 路由 | 小 | 1,800 | 1,500 | 60 | $0.0001035 |
 | 2 | 规划（选工具） | 大 | 6,500 | 6,000 | 300 | $0.00575 |
 | 3 | 工具决策（查订单） | 大 | 7,200 | 6,000 | 420 | $0.00870 |
 | 4 | 检索结果摘要 | 小 | 9,000 | 0 | 250 | $0.00150 |
 | 5 | 成文（800 字） | 大 | 8,400 | 6,000 | 480 | $0.01230 |
 | — | 工具 × 3 | — | — | — | — | $0.00060 |
 | — | 基础设施摊销 | — | — | — | — | $0.00260 |
-| | **合计** | | **32,900** | **19,500** | **1,510** | **$0.0316** |
+| | **合计** | | **32,900** | **19,500** | **1,510** | **$0.0315535（约 $0.0316）** |
 
 ```
 Run 成本 $0.0316 的构成（Aurora 优化前）
 
-未命中缓存的输入   ███████████████▏  37%   $0.0117
-命中缓存的输入     █████▋            14%   $0.0045
-输出 token         ████████████████  39%   $0.0122   ← 输出单价是输入的 4 倍
+普通输入           ███████████████▏  37%   $0.011645
+命中缓存的输入     █████▋            14%   $0.0045225
+输出 token         ████████████████  39%   $0.012186  ← 本算例输出单价是普通输入的 4 倍
 工具（三方 API）   ▊                  2%   $0.0006
 基础设施           ███▎               8%   $0.0026
                                      ─────
-                                     100%   $0.0316
+                                     100%   $0.0315535（约 $0.0316）
 ```
 
-**这张图要教你的第一件事**：输出 token 占 39%，而它只占 token 总量的 4.4%。**「让模型少说废话」在成本上的杠杆，比「把输入压一压」大得多**——因为输出的单价是输入的 4~10 倍。可惜所有人的第一反应都是压输入。
+**这张图要教你的第一件事**：输出 token 只占用量约 4.4%，却占成本约 39%。在本例，同模型少生成一个 token 比少读一个普通输入 token 省得更多；究竟优化哪一桶，还要看能删多少、实际价格以及对质量的影响。
 
 ### 47.2.3 每千 token 毛利：把成本换算成「单位经济学」
 
@@ -182,33 +183,29 @@ type PriceCard struct {
     InMicro    int64  // 每 1M token 的 micro-USD
     CacheMicro int64  // 命中缓存的输入单价
     OutMicro   int64
-    ReasonMicro int64 // 推理 token（如 o 系列 / R1 类），没有则为 0
-    CachedWriteMul int64 // 缓存写入倍率，百分比表示：125 = 1.25×
+    ReasonMicro int64 // 仅用于独立计价、已从普通输出剔除的推理 token
+    CacheWriteMicro int64 // 缓存写入的全价，按命中的写入档位配置
 }
 
 // cost/rating.go
 type Usage struct {
-    In, CacheRead, CacheWrite, Out, Reason int64
+    NormalIn, CacheRead, CacheWrite, NormalOut, Reason int64 // 互斥桶
 }
 
 // Micro 返回本次调用的成本，单位 micro-USD（1e-6 USD）
-// 全整数运算：tokens * micro_per_million / 1_000_000，先乘后除，避免精度丢失
+// 教学版：输入已校验且乘加不溢出；最后按 micro-USD 向下取整
 func (p PriceCard) Micro(u Usage) int64 {
-    // 未命中部分：(In - CacheRead) * InMicro
-    uncached := u.In - u.CacheRead
-    if uncached < 0 { uncached = 0 }          // 防御：厂商偶发返回 CacheRead > In
-
-    total := uncached*p.InMicro +
+    total := u.NormalIn*p.InMicro +
         u.CacheRead*p.CacheMicro +
-        u.CacheWrite*p.InMicro*p.CachedWriteMul/100 +
-        u.Out*p.OutMicro +
-        u.Reason*p.ReasonMicro          // 注意：多数厂商 Reason 已含在 Out 里，别重复计
+        u.CacheWrite*p.CacheWriteMicro +
+        u.NormalOut*p.OutMicro +
+        u.Reason*p.ReasonMicro
 
     return total / 1_000_000
 }
 ```
 
-> ⚠️ 两个必须写进单测的边界：① `CacheRead > In`（厂商回包口径不一致）；② 推理 token 是否已包含在 `completion_tokens` 里（OpenAI / Anthropic / 各类开源模型的口径**不一样**，收错就是双向错账）。见第 27 章。
+> ⚠️ 归一化放在厂商适配层。Anthropic 的原生 `input_tokens` 不含 `cache_read_input_tokens` 和 `cache_creation_input_tokens`，不再扣减；以总量上报的厂商，先做互斥拆分。若分桶对不上总量，不截成零继续扣款：保留原始用量并转对账。推理 token 若已含在输出且按相同单价收费，不另计。单测至少覆盖普通输入、全写入、全命中、混合、总量冲突与推理明细；多个写入档位分别计价。生产还要按合同处理溢出、舍入和舍入层级。见第 27 章。
 
 ### 47.4.2 归因：把成本打到四个维度上
 
@@ -452,7 +449,7 @@ alerts:
 | 根本问题 | 成本问题 90% 不是单价贵，是「用错档 + 算不清 + 没人负责」 |
 | 口径 | 四层口径（call/step/run/session）；**失败 Run 成本占 12%，不算是自欺** |
 | 算式 | `C_run = Σ(未命中×p_in + 命中×p_cache + out×p_out) + 工具 + 基建` |
-| 结构 | 输出 token 只占 4% 体积却占 39% 成本——**让它少说话比压输入更值** |
+| 结构 | 示例中输出约占 4% 用量、39% 成本；按可减少的量、价格和交付质量选优化点 |
 | 计算纪律 | 整数 micro-USD、价目表版本化、按事件时刻计价、可重放 |
 | 归因 | 四维（租户/场景/模型/步骤）+ 共享成本三层摊 + 失败成本归发起方 + 记 `saved_by_cache` |
 | 优化顺序 | **缓存 > 路由 > 瘦身 > 压缩 > 蒸馏**（先做不掉质量的） |

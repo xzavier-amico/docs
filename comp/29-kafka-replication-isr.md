@@ -465,7 +465,7 @@ follower 被踢出 ISR ⟺ 距离它上一次「LEO 追平 leader 当时的 LEO�
 
 | 能保证（在条件成立时） | 不能保证 | 靠什么绕过 |
 | --- | --- | --- |
-| 已 ack 消息在**当时 ISR 的每一份**上存在（`acks=all` + `min.insync≥2`） | 不保证在**故障域外**还有一份 | 副本**布局**（`rack` 感知分配，副本跨机柜/AZ），`min.insync=2` 且保证"至少 1 份在异地" |
+| `acks=all` 等待当前 ISR 的复制确认；`min.insync.replicas` 是 ISR 数量下限 | 不保证有副本在指定故障域外确认 | 副本分散部署，并让任何达到该下限的副本组合都不能落在同一故障域；或者用明确按故障域确认的方案 |
 | ISR 掉到下限以下时**拒绝写入**而不是静默降级（`min.insync.replicas`） | 不保证"拒绝"会被业务看见——`NotEnoughReplicas` 是 retriable，应用容易把它当抖动 | 显式计数 `NotEnoughReplicas` + 应用侧落本地 outbox + 对账 |
 | 故障后不丢已 ack 消息（`unclean=false`） | 不保证**可用**：ISR 不足时就是停写，可能停几十分钟 | 这是决策点：停写 vs 丢数据，必须写进预案（§29.7） |
 | 分区内**顺序与位点单调**（单 leader 串行 append） | 不保证位点**永久**唯一——unclean 之后 offset 会被复用 | 业务键（`order_id`）+ 幂等，不靠 offset 做业务主键 |
@@ -476,7 +476,7 @@ follower 被踢出 ISR ⟺ 距离它上一次「LEO 追平 leader 当时的 LEO�
 | —— | 不保证**刷盘**：所有副本同时掉电会丢页缓存尾部 | 承认它 + 上游可重放兜底；fsync 换不来可用性 |
 | —— | 不保证跨城强一致 / 提交即多数派 | 这已超出主从复制形态，需要共识型日志（`→ comp/31`）；形态决策见 [architect/15](../architect/15-message-store.md) |
 
-**一句话边界**：Kafka 的复制买到的是「**在故障域内、在 ISR 不缩水的前提下、在 unclean 关闭时**，已 ack 的消息不丢」。三个前提缺一个，断言就失效；而三个前提分别由**布局、`min.insync.replicas`、`unclean`** 三个不同位置的东西维持。
+**一句话边界**：布局约束副本可能在哪里，`min.insync.replicas` 约束 ISR 数量，`unclean` 决定是否允许不够新的副本上位。不能从其中任一条单独推出跨故障域持久性；还要看故障域外是否留有已确认且未损坏的副本。
 
 ---
 
@@ -616,7 +616,7 @@ histogram_quantile(0.99, rate(<cross_az_rtt_bucket>[5m])) > 5
 
 两个方案：
 - **A. 副本全部同 AZ，跨域用异步复制（MirrorMaker 2 / 集群间复制或下层存储复制）**。代价：跨域 RPO > 0（异步必然丢尾部），要单独定义"跨域切换时允许丢多少秒"，并且异地那份**不能反哺一致性**。收益：`acks=all` 回到 8 ms，容量与延迟预算稳定。
-- **B. 保留跨域副本，但把 `min.insync.replicas` 设为 2，且配合 `rack` 感知布局保证"2 份在同 AZ、1 份在异地"，同时接受异地那份允许落后**。注意这里有个陷阱：`min.insync=2` 只保证"ISR 里有 2 个"，**不保证那 2 个不在同一个机柜**——要真正买到"跨 AZ 不丢"，必须让 ISR 的构成规则跟着走（例如 `replica.selector.class` 之类的机架感知策略，可用性与具体机制以目标版本文档为准）。代价：策略复杂度上升，且一旦异地那份被算进 ISR，P99 就是 60 ms。
+- **B. 两个同 AZ 副本加一个异地副本，`min.insync.replicas=2`**：异地副本退出 ISR 后，本地两个仍能确认；此时不能承诺整 AZ 故障不丢已确认写入。`replica.selector.class` 只用于选择消费者读取的副本，不决定 ISR 或写入确认（见 [KIP-392](https://cwiki.apache.org/confluence/display/KAFKA/KIP-392%3A+Allow+consumers+to+fetch+from+closest+replica)）。若此布局必须等异地才确认，可把下限设为 3 并要求 `acks=all`，用任一副本掉队时停写来换确认范围；另一种布局是三个 AZ 各一份、下限为 2。跨域延迟需按实际拓扑测量。
 
 判据：**如果业务能接受跨域 RPO > 0，选 A**（延迟和容量都可控）；如果必须"跨域也不丢"，那么 60 ms 就是这笔保险的保费，不能既要 8 ms 又要跨域不丢。
 </details>

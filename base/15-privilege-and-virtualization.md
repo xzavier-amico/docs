@@ -172,14 +172,14 @@ Linux 的实现很省：用户 PGD 与内核 PGD 只差**第 12 位**，切换�
 
 ### vDSO：把「不需要跨界」的部分搬到边界这一侧
 
-同一张表里最有用的一行是 `clock_gettime`：31–67 ns，比 `syscall` 快 4–8 倍，而**它仍然是一个「系统调用」**。区别在于内核把一小段代码和一张 `vvar` 数据页**只读映射进了每个进程**，用户态直接调用那段代码、读共享内存里的时间，再用序列号（seqcount）检测「读的过程中内核有没有在更新」——**整个过程 CPL 没变过**。
+同一张表里最有用的一行是 `clock_gettime`：31–67 ns。这是同一个用户接口的 vDSO 快路径，**该路径本身不执行系统调用**。内核把代码和 `vvar` 数据映射进进程，用户态直接执行映射的代码，读共享时间数据，并用序列号（seqcount）检查读取时内核是否在更新；快路径不改变 CPL。
 
 ```
    普通 syscall：用户 ──[trap]──► 内核 ──[sysret]──► 用户     ≈ 285 cycle
    vDSO       ：用户 ────── 读映射页 + 算 ──────► 用户        ≈ 100 cycle
 ```
 
-**功能、语义完全一样，把跨界去掉，价格掉一个档**——这是主线③最干净的证据。`gettimeofday`、`time`、`getcpu`、`clock_gettime` 都走这条路；`getrandom` 不走（必须进内核消耗熵池，见 §15.12 Q1）。到这里，「微内核为什么慢」的物理来源已经齐了：**IPC 就是「两次跨界 + 一次数据搬运」**。
+**支持快路径时，不必为这次调用跨进内核**——这是主线③最干净的证据。`gettimeofday`、`time`、`getcpu`、`clock_gettime` 在支持的架构和条件下可走这条路；Linux 6.11 起，x86 也提供带独立可写状态的 `__vdso_getrandom`（见 §15.12 Q1）。下面再看调用真的跨界时，会怎样为 IPC 付费。
 
 ---
 
@@ -555,13 +555,13 @@ pipe()+2*close    : 3827 / 5367 / 3107 ns/op
 
 ## 15.12 自检 3 题
 
-**Q1.** `clock_gettime(CLOCK_MONOTONIC)` 走 vDSO 只要 30 ns，强制走 `syscall(SYS_clock_gettime)` 要 150 ns。用「跨界」解释这 5 倍差距，并说明为什么 `getrandom` 没有 vDSO 版本。
+**Q1.** 假设 `clock_gettime(CLOCK_MONOTONIC)` 走 vDSO 耗时 30 ns，强制走系统调用耗时 150 ns。用「跨界」解释差距，并比较 Linux 6.11 x86 的 `getrandom` 快路径与时钟快路径。
 
 <details><summary>答案</summary>
 
 vDSO 的本质是**内核把「读时间」这段代码和一页数据只读映射进了用户地址空间**。调用它时 CPL 一直是 3：没有 `syscall` 指令、没有栈切换、没有 `pt_regs`、没有 CR3 切换（KPTI 下这一项尤其贵）。用户态直接读 `vvar` 页里的 `(sec, nsec)`，再用序列号判断「读的过程中内核有没有在写」（写者前后各加一次 seq，读者发现两次不相等就重试）。30 ns ≈ 一次函数调用 + 两次内存读 + 一次分支；150 ns 里绝大部分不是「读时间」，是「过边界」（§15.3 的 285 cycle 路径）。
 
-`getrandom` 不能这么做，因为 vDSO 的前提是**「只读共享 + 内核单方面更新」**：时间可以被内核周期性写进 `vvar`，读者无副作用；而随机数必须**一次性消费**——放进共享页让用户态自己取，就没有「消耗」这个动作，多个进程会拿到同一个数，安全性归零。判据是：**凡需要内核侧状态改变的调用，都进不了 vDSO。**
+时钟快路径读取内核发布的数据；随机数快路径则使用调用方独立的可写状态在用户态生成随机字节，并非所有进程读取同一份随机字节。重播种或不符合快路径条件时仍会走系统调用。应用是否实际使用快路径也取决于运行库等调用方。见 [Linux 6.11 x86 入口](https://github.com/torvalds/linux/blob/v6.11/arch/x86/entry/vdso/vgetrandom.c)和[通用实现](https://github.com/torvalds/linux/blob/v6.11/lib/vdso/getrandom.c)。
 </details>
 
 **Q2.** 容器里 `capsh --print` 显示 41 个 capability 全开，但 `sysctl -w net.ipv4.ip_forward=0` 仍然 `permission denied`。矛盾吗？说出内核检查的那一行。

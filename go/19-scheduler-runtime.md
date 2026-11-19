@@ -698,17 +698,17 @@ func checkTimers(pp *p, now int64) (rnow, pollUntil int64, ran bool) {
   CPU limit (cgroup)= 2   ← 真正的物理约束：超出就被 CFS throttle
 ```
 
-**经典事故**：Pod 的 `limits.cpu = 2`，节点 64 核，Go 1.24 及以前 `GOMAXPROCS` 默认取**宿主机核数 64**。于是 runtime 起了 64 个 P 全力并行 → 瞬间把 2 核配额烧完 → 被 throttle 到下一个 100ms 周期 → **你的服务每隔 100ms 停一次，P99 直接崩**。
+**经典事故**：Pod 的 `limits.cpu = 2`，进程启动时能看到 64 个逻辑 CPU；在旧默认行为下 `GOMAXPROCS` 可能为 64。高并行负载便可能提前耗完当期配额，被限流到下一周期；这是尾延迟抖动的一种来源。
 
-**Go 1.25 的修复**：默认 `GOMAXPROCS` 改为**感知 cgroup CPU 带宽限制**（读 `/sys/fs/cgroup/.../cpu.max` 之类），并在限额变化时更新。相关旋钮：
+**Go 1.25 的修复**：Linux 运行时默认可感知 cgroup CPU 带宽限制，并定期重算。程序的语言版本为 1.24 或更早时，两个相关 `GODEBUG` 项默认保留旧行为；见 [Go 1.25 runtime 文档](https://pkg.go.dev/runtime@go1.25.0#GOMAXPROCS)。
 
 | 开关 | 作用 |
 | --- | --- |
-| 默认行为（1.25+） | 取容器 CPU limit 与 `NumCPU` 的较小者 |
-| `GODEBUG=containermaxprocs=0` | 关闭基于容器的初始值（回到 `NumCPU`） |
+| 启用新默认行为 | 通常取逻辑 CPU 数、CPU affinity 与 cgroup 吞吐上限的较小值；分数配额向上取整，逻辑 CPU 数和 affinity 均至少为 2 时，不会单因配额低于 2 而降至 1 |
+| `GODEBUG=containermaxprocs=0` | 默认值不考虑容器 CPU 配额 |
 | `GODEBUG=updatemaxprocs=0` | 关闭"限额变化时自动更新" |
 | `runtime.SetDefaultGOMAXPROCS()` | 手动重算并设置默认值（1.25 新增） |
-| `runtime.GOMAXPROCS(n)` | 手动设定，优先级最高 |
+| `GOMAXPROCS` 环境变量或 `runtime.GOMAXPROCS(n)`（`n>0`） | 手动设定并停用自动更新；`runtime.SetDefaultGOMAXPROCS()` 可恢复默认行为 |
 
 > ⚠️ 但请注意：`GOMAXPROCS` 只管**执行 Go 代码的并行度**，**管不了线程总数**。你的服务如果有一堆阻塞 syscall 或 cgo，`threads` 依然可以把 CPU 烧穿配额。所以"`GOMAXPROCS` 对齐 limit"是必要条件，不是充分条件（第 52 章会讲在 K8s 里怎么把 `limits.cpu`、`GOMEMLIMIT`、`GOMAXPROCS` 三者对齐）。
 
