@@ -1,7 +1,6 @@
 nav:
   - 首页: index.md
   - go
-  - llm_base
   - llm
   - eng
   - algo
