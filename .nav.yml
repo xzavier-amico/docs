@@ -2,6 +2,7 @@ nav:
   - 首页: index.md
   - go
   - llm
+  - llm_base
   - eng
   - algo
   - architect
