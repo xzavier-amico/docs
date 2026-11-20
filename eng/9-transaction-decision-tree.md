@@ -151,7 +151,7 @@ CREATE TABLE stock_reservation (
 **理由**：
 
 - 第三方支付没有 XA 接口，最多给你「查询 + 退款/冲正」；强一致只能做到「我方支付单」这一层。
-- 支付单与事件同事务落库，保证「支付成功」不丢；账务消费用 `biz_no` 唯一索引，重复回调只产生一条分录。
+- 支付单与事件同事务落库，保证「支付成功」不丢；账务消费用 `(biz_no, entry_no)` 唯一索引，重复回调不新增分录（借贷两条整体幂等）。
 - 复式记账：一笔支付 = 借「银行存款」、贷「商户待结算」，金额相等；任何单边分录都是脏数据。
 - 日终用渠道对账文件核对，差异进差异表（详见第 14 章）。
 
@@ -291,6 +291,8 @@ func Decide(c Constraints) string {
 	switch {
 	case c.SameDB:
 		return "LOCAL_TX"
+	case c.SameService && c.StrongConsistency && !c.LongRunning && !c.HasThirdParty:
+		return "XA" // 同一服务、多个数据源、短事务、无第三方
 	case !c.SameService && c.StrongConsistency && c.Reservable && !c.LongRunning:
 		return "TCC"
 	case !c.SameService && c.StrongConsistency && !c.Reservable:

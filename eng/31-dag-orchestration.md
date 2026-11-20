@@ -345,7 +345,7 @@ SELECT task, MIN(depth) AS depth FROM down GROUP BY task ORDER BY depth, task;
 WITH picked AS (
   SELECT id FROM dag_task
    WHERE state = 'PENDING'
-     AND ready_at <= NOW(3)
+     AND ready_at <= CURRENT_TIMESTAMP(3)
    ORDER BY ready_at, id
    LIMIT :n
    FOR UPDATE SKIP LOCKED
@@ -354,8 +354,8 @@ UPDATE dag_task t
    SET state = 'RUNNING',
        attempt = attempt + 1,
        worker_id = :worker,
-       started_at = NOW(3),
-       lease_until = NOW(3) + INTERVAL '90 second'
+       started_at = CURRENT_TIMESTAMP(3),
+       lease_until = CURRENT_TIMESTAMP(3) + INTERVAL '90 second'
   FROM picked p
  WHERE t.id = p.id
 RETURNING t.id, t.task_key, t.shard_index, t.attempt;
@@ -371,12 +371,12 @@ func (s *Scheduler) Claim(ctx context.Context, workerID string, n int) ([]Task, 
 	rows, err := s.db.QueryContext(ctx, `
 		WITH picked AS (
 		  SELECT id FROM dag_task
-		   WHERE state='PENDING' AND ready_at <= NOW(3)
+		   WHERE state='PENDING' AND ready_at <= CURRENT_TIMESTAMP(3)
 		   ORDER BY ready_at, id LIMIT $1
 		   FOR UPDATE SKIP LOCKED)
 		UPDATE dag_task t SET state='RUNNING', attempt=attempt+1,
-		       worker_id=$2, started_at=NOW(3),
-		       lease_until=NOW(3) + INTERVAL '90 second'
+		       worker_id=$2, started_at=CURRENT_TIMESTAMP(3),
+		       lease_until=CURRENT_TIMESTAMP(3) + INTERVAL '90 second'
 		  FROM picked p WHERE t.id=p.id
 		RETURNING t.id, t.dag_run_id, t.task_key, t.shard_index, t.attempt`, n, workerID)
 	if err != nil {
@@ -401,16 +401,16 @@ func (s *Scheduler) Finish(ctx context.Context, t Task, result Result) error {
 		switch {
 		case result.Err == nil:
 			_, err := tx.ExecContext(ctx, `
-				UPDATE dag_task SET state='SUCCESS', finished_at=NOW(3),
+				UPDATE dag_task SET state='SUCCESS', finished_at=CURRENT_TIMESTAMP(3),
 				       lease_until=NULL, output_meta=$2
 				 WHERE id=$1 AND state='RUNNING'`, t.ID, result.Meta)
 			if err != nil { return err }
 
 		case result.Retryable && t.Attempt < t.MaxAttempts:
-			backoff := time.Duration(1<<uint(t.Attempt)) * 30 * time.Second // 30s,60s,120s...
+			backoff := time.Duration(1<<uint(t.Attempt-1)) * 30 * time.Second // 30s,60s,120s...
 			if backoff > 10*time.Minute { backoff = 10 * time.Minute }
 			_, err := tx.ExecContext(ctx, `
-				UPDATE dag_task SET state='PENDING', ready_at=NOW(3)+$2::interval,
+				UPDATE dag_task SET state='PENDING', ready_at=CURRENT_TIMESTAMP(3)+$2::interval,
 				       lease_until=NULL, error_code=$3, error_msg=$4
 				 WHERE id=$1 AND state='RUNNING'`,
 				t.ID, backoff.String(), result.Code, truncate(result.Msg, 1000))
@@ -418,7 +418,7 @@ func (s *Scheduler) Finish(ctx context.Context, t Task, result Result) error {
 
 		default: // 不可重试，或次数用尽
 			_, err := tx.ExecContext(ctx, `
-				UPDATE dag_task SET state='FAILED', finished_at=NOW(3),
+				UPDATE dag_task SET state='FAILED', finished_at=CURRENT_TIMESTAMP(3),
 				       lease_until=NULL, error_code=$2, error_msg=$3
 				 WHERE id=$1 AND state='RUNNING'`, t.ID, result.Code, truncate(result.Msg, 1000))
 			if err != nil { return err }
@@ -436,12 +436,12 @@ func (s *Scheduler) Finish(ctx context.Context, t Task, result Result) error {
 -- 回收"worker 已死但没交卷"的任务。留 30 秒宽限，避免误杀 GC 停顿的 worker。
 UPDATE dag_task
    SET state = 'PENDING', worker_id = NULL, lease_until = NULL,
-       ready_at = NOW(3), version = version + 1,
+       ready_at = CURRENT_TIMESTAMP(3), version = version + 1,
        error_code = 'LEASE_EXPIRED'
  WHERE id IN (
    SELECT id FROM dag_task
     WHERE state = 'RUNNING'
-      AND lease_until < NOW(3) - INTERVAL 30 SECOND
+      AND lease_until < CURRENT_TIMESTAMP(3) - INTERVAL 30 SECOND
     ORDER BY lease_until
     LIMIT 200
     FOR UPDATE SKIP LOCKED
@@ -945,11 +945,12 @@ SELECT t.dag_run_id, t.task_key, t.state AS task_state,
 
 ```sql
 WITH hist AS (
-  SELECT biz_date,
-         CAST(JSON_EXTRACT(output_meta, '$.rows') AS UNSIGNED) AS rows_cnt
-    FROM dag_task
-   WHERE task_key = 'merge-recon' AND state = 'SUCCESS'
-     AND biz_date >= CURDATE() - INTERVAL 14 DAY
+  SELECT r.biz_date,
+         CAST(JSON_EXTRACT(t.output_meta, '$.rows') AS UNSIGNED) AS rows_cnt
+    FROM dag_task t
+    JOIN dag_run r ON r.id = t.dag_run_id
+   WHERE t.task_key = 'merge-recon' AND t.state = 'SUCCESS'
+     AND r.biz_date >= CURDATE() - INTERVAL 14 DAY
 )
 SELECT biz_date, rows_cnt,
        AVG(rows_cnt) OVER (ORDER BY biz_date ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING) AS avg7,
@@ -989,7 +990,7 @@ RUN=$($PSQL -c "INSERT INTO dag_run(dag_key,definition_id,run_key,state,trigger_
      VALUES ('$DAG',(SELECT MAX(id) FROM dag_definition
                       WHERE dag_key='$DAG' AND status='ACTIVE'),
              '${DAG}:${DATE}','RUNNING','MANUAL','verify','$DATE',
-             NOW(3)+INTERVAL 2 HOUR) RETURNING id")
+             CURRENT_TIMESTAMP(3)+INTERVAL '2 HOUR') RETURNING id")
 echo "run_id=$RUN"
 
 # 2) 等 normalize 进入 RUNNING，然后强杀它（模拟 worker 崩溃）
@@ -1009,7 +1010,7 @@ ROW=""
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   ROW=$($PSQL -c "SELECT state||'|'||attempt FROM dag_task
                    WHERE dag_run_id=$RUN AND task_key='normalize' LIMIT 1")
-  case "$ROW" in SUCCESS\|2|RUNNING\|2) break;; esac
+  case "$ROW" in SUCCESS\|2) break;; esac
   sleep 5
 done
 echo "normalize => ${ROW:-<none>}"

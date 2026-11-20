@@ -34,7 +34,7 @@ if time.Now().Hour() >= 18 {
 | 11:40 | 回滚完成。**但已经被判定"重试耗尽"的实例不会自动复活** |
 | 13:20 | 开始用 `temporal workflow reset` 逐个重置到上一个 workflow task |
 | 16:20 | 2,847 个实例重置完成，剩余 253 个 history 已损坏，只能人工补单 |
-| 17:30 | 全部恢复。**累计延迟 6 小时 40 分，214 单超过监管 24 小时时限，赔付与罚金 18 万元** |
+| 17:30 | 全部恢复。**累计延迟 7 小时 26 分，214 单超过监管 24 小时时限，赔付与罚金 18 万元** |
 
 复盘时最扎人的一句是：
 
@@ -42,7 +42,7 @@ if time.Now().Hour() >= 18 {
 
 ### 事故二：三步流程上了 BPMN，业务最后用 Excel 绕过去了
 
-同年 7 月，另一家 SaaS 公司的"发票申请"流程：**提交 → 审批 → 开票**，三步，一个团队，一年改 0~1 次。
+同年 3 月，另一家 SaaS 公司的"发票申请"流程：**提交 → 审批 → 开票**，三步，一个团队，一年改 0~1 次。
 
 他们上了 Camunda 7 + BPMN，画了 **47 个节点**（各种排他网关、定时边界事件、消息事件、子流程）。上线后：
 
@@ -208,7 +208,7 @@ if time.Now().Hour() >= 18 {
 | --- | --- | --- | --- | --- | --- | --- |
 | **默认**（20/25/20/15/20） | 3.15 | 3.35 | 3.30 | 2.70 | **4.00** | 自研赢 → 先自研，别急着买 |
 | **长事务优先**（10/15/15/10/**50**） | **3.90** | 3.25 | 2.80 | 2.85 | 3.20 | Temporal 反超 → 有跨天等待就买 |
-| **运维优先**（10/**40**/20/15/15） | 3.00 | 3.35 | 3.10 | 2.60 | **4.15** | 自研更大优势 → 没有平台团队就别买 |
+| **运维优先**（10/**40**/20/15/15） | 3.00 | 3.35 | 3.25 | 2.80 | **4.15** | 自研更大优势 → 没有平台团队就别买 |
 
 > 💡 **正确的用法**：不要问"哪个引擎最好"，要问**"我们的权重是多少，以及这个权重在未来 18 个月会不会变"**。一个 6 人团队、流程 8 步、要等审批 3 天——权重接近"长事务优先"，Temporal 是对的；一个 200 人平台、流程 5 步、纯同步——权重接近"运维优先"，自研 + 状态机表才是对的，上 Temporal 是给自己找第二个要值班的系统。
 
@@ -284,7 +284,7 @@ decision_reason: >-
   重新评估 in_house（见 sensitivity.longtx_050）。
 sensitivity:
   longtx_050: {temporal: 3.90, argo: 3.25, airflow: 2.80, flowable: 2.85, in_house: 3.20}
-  ops_040:    {temporal: 3.00, argo: 3.35, airflow: 3.10, flowable: 2.60, in_house: 4.15}
+  ops_040:    {temporal: 3.00, argo: 3.35, airflow: 3.25, flowable: 2.80, in_house: 4.15}
 exit_plan:
   invariant: 业务状态双写到 refund_order.biz_status，run_id 关联
   fallback_driver: 自研状态机 + 巡检（第 30/33 章）
@@ -297,7 +297,7 @@ exit_plan:
 
 | # | 不能进 workflow 的东西 | 为什么 | 正确写法 |
 | --- | --- | --- | --- |
-| 1 | `time.Now()` / `System.currentTimeMillis()` | 重放时值不同 → 分支走错 | `workflow.Now(ctx)` / `Workflow.now()` |
+| 1 | `time.Now()` / `System.currentTimeMillis()` | 重放时值不同 → 分支走错 | `workflow.Now(ctx)` / `Workflow.currentTimeMillis()` |
 | 2 | `rand.*` / `math/rand` | 同上，且不可复现 | `workflow.SideEffect` / `Workflow.randomUUID()` |
 | 3 | HTTP / DB / 任何网络 IO | 重放会重复调用；且阻塞 workflow task | 放进 **activity** |
 | 4 | 全局变量、包级变量、单例可变状态 | 重放时值与首次执行不同 | 全部状态走参数/返回值/`SideEffect` |
@@ -374,6 +374,9 @@ func ReviewWorkflow(ctx workflow.Context, claimID string) (string, error) {
             return "", err
         }
         var approved bool
+        workflow.Go(ctx, func(gctx workflow.Context) {
+            workflow.GetSignalChannel(gctx, "approval").Receive(gctx, &approved)
+        })
         if err := workflow.AwaitWithTimeout(ctx, 72*time.Hour, func() bool { return approved }); err != nil {
             return "", fmt.Errorf("approval timeout: %w", err)   // 超时是业务失败，不是重试
         }

@@ -12,7 +12,7 @@
 UPDATE orders SET status='PAID', paid_at=NOW(3) WHERE order_no=?;
 ```
 
-没有 `AND status='CREATED'`。其中一单在 23:59:30 已因超时被关单，库存也已释放；回调把它**从 `CLOSED` 改回 `PAID`**，履约系统看到 `PAID` 就推仓库，**错发 1,300 单**。同一时间，库存服务的扣减是「先 `SELECT available` 再 `UPDATE stock=stock-n`」，两个并发请求都读到 1 件，最后库存变成 **-1,860 件**。
+没有 `AND status='CREATED'`。其中一单在 23:59:30 已因超时被关单，库存也已释放；回调把它**从 `CLOSED` 改回 `PAID`**，履约系统看到 `PAID` 就推仓库，**错发 1,300 单**。同一时间，库存服务的扣减是「先 `SELECT available` 再 `UPDATE stock=stock-n`」，两个并发请求都读到 1 件，各自扣 1 件，这一单超卖 1 件；当天高峰期同类并发累计把库存打到 **-1,860 件**（当时库里没有 `CHECK(available>=0)`）。
 
 结果：错发 1,300 单、超卖 1,860 件、直接损失 **78 万元**、客诉 **640 起**，从第一笔异常到止血用了 **17 分钟**。复盘时发现：创建订单有唯一索引，支付回调没有状态条件，库存扣减没有条件更新——**7 个幂等点只做了 1 个**。
 
@@ -58,7 +58,7 @@ UPDATE orders SET status='PAID', paid_at=NOW(3) WHERE order_no=?;
 | --- | --- | --- | --- | --- | --- |
 | ① | 创建订单 | 用户连点、网关重试 | `(user_id, client_token)` | 唯一索引，冲突读回 | 200 并发同 token → 1 单 |
 | ② | 支付回调 | 渠道重试 6 次、乱序 | `(channel, channel_txn_id)` | 验签 + 幂等表 + 状态条件 | 重放 10 次 → 1 条分录 |
-| ③ | 库存扣减 | 并发扣减、重试重复扣 | `(order_no, 'DEDUCT')` | `UPDATE ... WHERE available>=n` + 流水表 | 200 并发 → 不超卖、不少卖 |
+| ③ | 库存扣减 | 并发扣减、重试重复扣 | `(order_no, sku_id, 'DEDUCT')` | `UPDATE ... WHERE available>=n` + 流水表 | 200 并发 → 不超卖、不少卖 |
 | ④ | 发货 | 履约系统重试 | `(order_no, 'SHIP')` | 状态条件 + 运单号唯一 | 重复发货请求 → 1 个运单 |
 | ⑤ | 退款 | 多次申请、部分退款 | `(payment_id, refund_request_id)` | 唯一索引 + 累计退款条件 | 并发退款 → 不超额 |
 | ⑥ | 关单 | 超时任务与手动关单并发 | `(order_no, 'CLOSE')` | `WHERE status='CREATED'` | 支付/关单并发 → 只有一方赢 |
@@ -125,7 +125,7 @@ func (s *OrderService) Create(ctx context.Context, req CreateReq) (*Order, error
 }
 ```
 
-**验证**：200 并发同 `client_token`，`orders` 只 1 条，`stock_op_log` 只 1 条 `DEDUCT`，库存只减一次。见 §4.7。
+**验证**：200 并发同 `client_token`，`orders` 只 1 条，`stock_op_log` 每个 SKU 只 1 条 `DEDUCT`，库存只减一次。见 §4.7。
 
 ### 4.4.2 支付回调：验签 + 幂等表 + 状态机，三件套缺一不可
 
@@ -272,7 +272,7 @@ CREATE TABLE stock (
 
 CREATE TABLE stock_op_log (
   id       BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  op_no    VARCHAR(96) NOT NULL,       -- order_no + ':' + DEDUCT/RELEASE
+  op_no    VARCHAR(96) NOT NULL,       -- order_no + ':' + sku_id + ':' + DEDUCT/RELEASE
   sku_id   BIGINT      NOT NULL,
   qty      INT         NOT NULL,
   op_type  VARCHAR(16) NOT NULL,
@@ -287,7 +287,7 @@ CREATE TABLE stock_op_log (
 ```sql
 START TRANSACTION;
 INSERT INTO stock_op_log(op_no,sku_id,qty,op_type,order_no)
-VALUES ('ORD20260101001:DEDUCT',1001,2,'DEDUCT','ORD20260101001');
+VALUES ('ORD20260101001:1001:DEDUCT',1001,2,'DEDUCT','ORD20260101001');
 
 UPDATE stock
 SET available = available - 2, reserved = reserved + 2
@@ -310,8 +310,9 @@ WHERE sku_id = 1001 AND version = 7 AND available >= 2;
 int n = jdbc.update("UPDATE stock SET available=available-?, reserved=reserved+? " +
     "WHERE sku_id=? AND available>=?", qty, qty, skuId, qty);
 if (n == 0) {
-    StockOp op = jdbc.queryForObject("SELECT * FROM stock_op_log WHERE op_no=?", ...);
-    if (op != null) return;                 // 之前已扣成功，重试直接返回
+    // queryForObject 在 0 行时抛 EmptyResultDataAccessException，不会返回 null
+    List<StockOp> ops = jdbc.query("SELECT * FROM stock_op_log WHERE op_no=?", ...);
+    if (!ops.isEmpty()) return;             // 之前已扣成功，重试直接返回
     throw new SoldOutException(skuId);      // 真的不够
 }
 ```
@@ -339,7 +340,7 @@ if n, _ := res.RowsAffected(); n == 0 {
 **少卖的两个根因**：
 
 1. **超时重试被当成「库存不足」**：第一次扣减已提交，响应丢了；重试时 `available` 已经不够，代码直接返回 `SoldOut`，订单取消但库存还挂在 `reserved` 里。修：先按 `op_no` 查流水，存在就返回成功（上面的代码）。
-2. **关单没有释放预占**：`reserved` 只增不减，越卖越少。修：关单成功后用 `op_no=order:RELEASE` 做条件释放，释放本身也幂等；对账 SQL 查「`reserved > 0` 且订单已关闭」的记录。
+2. **关单没有释放预占**：`reserved` 只增不减，越卖越少。修：关单成功后用 `op_no=order:sku:RELEASE` 做条件释放，释放本身也幂等；对账 SQL 查「`reserved > 0` 且订单已关闭」的记录。
 
 > 💡 记住一句话：**`WHERE available >= n` 防超卖，`stock_op_log` 防少卖。** 两个都要，只做一个都会在高峰期出事。
 
@@ -389,7 +390,7 @@ WHERE order_no=? AND status='CREATED'
   AND created_at < NOW(3) - INTERVAL 30 MINUTE;
 ```
 
-超时任务和运营手动关单都走这一条；影响 1 行的那个负责释放库存（`op_no=order:RELEASE`）和关单事件。影响 0 行 → 回查：已 `PAID` 就不能关，已 `CLOSED` 就返回成功。**支付回调与关单并发**时，两边都带 `WHERE status='CREATED'`，InnoDB 行锁保证只有一个赢；输的那方必须走「已支付→退款」或「已关闭→拒绝支付」，不能强行覆盖。
+超时任务和运营手动关单都走这一条；影响 1 行的那个负责释放库存（`op_no=order:sku:RELEASE`）和关单事件。影响 0 行 → 回查：已 `PAID` 就不能关，已 `CLOSED` 就返回成功。**支付回调与关单并发**时，两边都带 `WHERE status='CREATED'`，InnoDB 行锁保证只有一个赢；输的那方必须走「已支付→退款」或「已关闭→拒绝支付」，不能强行覆盖。
 
 ### 4.4.7 补偿：重跑十次也只生效一次
 
@@ -481,7 +482,7 @@ FROM orders o JOIN stock_op_log l ON l.order_no=o.order_no
 JOIN stock s ON s.sku_id=l.sku_id
 WHERE o.status='CLOSED' AND l.op_type='DEDUCT'
   AND NOT EXISTS (SELECT 1 FROM stock_op_log r
-                  WHERE r.op_no=CONCAT(o.order_no,':RELEASE'));
+                  WHERE r.op_no=CONCAT(o.order_no,':',l.sku_id,':RELEASE'));
 
 -- 4. 已支付订单必须有回调记录；有回调必须有订单
 SELECT o.order_no FROM orders o

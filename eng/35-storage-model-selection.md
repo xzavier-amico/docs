@@ -89,7 +89,7 @@
 
 | 类别 | 数据模型 | 强项 | 弱项 | 真实误用（后果） |
 | --- | --- | --- | --- | --- |
-| **关系** MySQL/PG | 行 + 强类型列 + B+ 树 | 事务、约束、join、多维查询、生态 | 水平扩展难、宽表/大文本差、DDL 有代价 | 12 亿行心跳写单表，4.7TB，一次 COUNT 打挂主库 **38 分钟** |
+| **关系** MySQL/PG | 行 + 强类型列 + B+ 树 | 事务、约束、join、多维查询、生态 | 水平扩展难、宽表/大文本差、DDL 有代价 | 19.2 亿行心跳写单表（16 个月 × 12 亿/月），4.7TB，一次 COUNT 打挂主库 **38 分钟** |
 | **文档** MongoDB | BSON 文档 + 集合 | 嵌套结构、schema 灵活、单文档原子 | 跨文档事务贵、join 弱、大集合吃内存 | 四层权限用 `$lookup`，鉴权 **1.9s**，登录失败 **22 分钟** |
 | **宽列** Cassandra/HBase | partition key + clustering + 列族 | 写吞吐、线性扩展、海量稀疏 | 查询必须按分区设计、无 join、聚合弱 | 按 `user_id` 分区却按时间查，扫 200 节点，P99 **12s** |
 | **KV** Redis/etcd | key → value（+ TTL） | O(1)、亚毫秒、简单 | 无查询语言、内存贵、持久化弱 | Redis 当订单唯一存储，主从切换丢 **40 分钟 / 2.3 万单** |
@@ -219,13 +219,13 @@ db.article.createIndex({ title: "text", "blocks.text": "text" });
 **第三，注入真实故障**。kill 主库、拔网线、磁盘写满、副本延迟 30 秒，看它降级成什么样。
 
 ```sql
--- 1) 谁在扫全表：按扫描行数排序
-SELECT object_schema, object_name, index_name,
+-- 1) 谁在扫全表：按扫描行数排序（行扫描数在 events_statements_summary_by_digest）
+SELECT schema_name, digest_text,
        count_star, sum_rows_examined, sum_timer_wait/1e12 AS total_sec
-FROM performance_schema.table_io_waits_summary_by_index_usage
-WHERE object_schema = 'order_db'
-ORDER BY sum_rows_examined DESC
-LIMIT 20;
+  FROM performance_schema.events_statements_summary_by_digest
+ WHERE schema_name = 'order_db'
+ ORDER BY sum_rows_examined DESC
+ LIMIT 20;
 
 -- 2) 表实际占用：数据 + 索引 + 碎片，别只看行数
 SELECT table_name,
@@ -273,14 +273,14 @@ ORDER BY data_length + index_length DESC;
 | 图（原生） | 中 | 低（指针跳） | 0.5~2ms/跳 | 差（非遍历） | 内存 + 磁盘 | 分片（难） |
 | 时序 | 中 | 低（按时间块） | 1~5ms | 极好（时间范围） | 磁盘 + 压缩 | 分片 |
 | 搜索（倒排） | **很高**（段合并） | 低 | 5~50ms | 极好（全文） | 内存 + CPU | 分片 |
-| 列存 | 低（批量） | **高**（扫列） | 50~500ms（点查） | **极好**（聚合） | 磁盘便宜 | 加节点 |
+| 列存 | 中~高（merge 重写 part） | **高**（扫列） | 50~500ms（点查） | **极好**（聚合） | 磁盘便宜 | 加节点 |
 | 向量（HNSW） | 高（图索引） | 中（ef 搜索） | 1~20ms | 差 | **内存最贵** | 分片 + 副本 |
 | 对象存储 | 无 | 无 | 20~200ms | 差（需列式） | **极便宜** | 无限 |
 
 **三个必须理解的物理事实**：
 
 ```text
-① LSM 的写放大 = 数据被反复 compaction 重写，典型 10~30 倍
+① LSM/MergeTree 的写放大 = 数据被反复 compaction/merge 重写，典型数倍~30 倍
    → 所以 Cassandra/ClickHouse 的「写入量大」是用磁盘寿命换的
 
 ② 倒排索引的写放大最高（ES 段合并），且「刷新」有 1s 延迟

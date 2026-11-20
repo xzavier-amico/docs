@@ -22,7 +22,7 @@ MySQL（商品主数据）  →  Redis（详情缓存，TTL 10 分钟）  →  E
 | 09:58:00.120 | 删 Redis 缓存失败（超时），代码 `catch` 后**只打了日志，继续往下走** |
 | 09:58:00.300 | ES 更新成功（列表页显示 179） |
 | 09:58:01 | 用户从搜索页点进详情页，**命中旧缓存 199** |
-| 09:58~10:10 | 先后 **3,400 单** 以 199 成交（详情页 199，列表页 179） |
+| 09:58~10:08 | 先后 **3,400 单** 以 199 成交（详情页 199，列表页 179） |
 | 10:12 | 客服发现「价格不一致」投诉 200+ |
 | 10:20 | 手动清缓存 + 全量重建 ES |
 | 10:35 | 数据一致，但已成交订单需逐个处理 |
@@ -283,7 +283,7 @@ func (h *Handler) HandleProductUpdated(ctx context.Context, e Event) error {
     // ① Redis：版本号比较后写（防乱序）
     if _, err := h.redis.Eval(ctx, setIfNewerLua,
         []string{"product:" + strconv.FormatInt(p.ID, 10)},
-        p.PayloadJSON, p.Version, 600).Result(); err != nil {
+        e.Payload, p.Version, 600).Result(); err != nil {
         return err
     }
     // ② ES：external version，旧事件自动被拒（409）
@@ -313,12 +313,13 @@ LIMIT 1000;
 ```
 
 ```go
-// 2) 抽样比对（应用侧，10% 采样，避免全量压垮缓存）
+// 2) 抽样比对（按 id % 10 采样，避免 ORDER BY RAND() 的全量排序）
 func (c *Checker) Verify(ctx context.Context) (mismatch int, err error) {
     rows, err := c.db.QueryContext(ctx, `
         SELECT id, price_cents, version FROM product
         WHERE updated_at >= NOW() - INTERVAL 1 HOUR
-        ORDER BY RAND() LIMIT 200`)
+          AND id % 10 = 0
+        ORDER BY updated_at LIMIT 200`)
     if err != nil { return 0, err }
     defer rows.Close()
     for rows.Next() {
@@ -328,7 +329,11 @@ func (c *Checker) Verify(ctx context.Context) (mismatch int, err error) {
         if err != nil { continue }
         // 版本落后 = 正常（可能还没消费到），版本相同但值不同 = 真不一致
         if cv, _ := strconv.ParseInt(cached["version"], 10, 64); cv == ver {
-            if cached["priceCents"] != strconv.FormatInt(price, 10) {
+            var p Product
+            if err := json.Unmarshal([]byte(cached["payload"]), &p); err != nil {
+                continue // payload 损坏，交给 repair/告警
+            }
+            if p.PriceCents != price {
                 mismatch++
                 c.repair(id)    // 主动删缓存/重建 ES
             }
@@ -455,7 +460,10 @@ func TestCacheConsistency(t *testing.T) {
         go func(v int64) {           // 写
             defer wg.Done()
             _, err := svc.UpdatePrice(ctx, 1, v, currentVersion())
-            require.NoError(t, err)
+            // 并发写允许版本冲突；这里只要求不是别的错误
+            if err != nil && !errors.Is(err, ErrOptimisticLock) {
+                t.Errorf("update failed: %v", err)
+            }
         }(int64(i))
         go func() {                  // 读
             defer wg.Done()

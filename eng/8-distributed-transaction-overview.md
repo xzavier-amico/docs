@@ -6,15 +6,15 @@
 
 ---
 
-## 8.1 引子：一次 XA 提交，锁了库存库 38 分钟
+## 8.1 引子：一次 XA 提交，锁了库存库 79 分钟
 
 2025-06-18 00:07，某电商大促第 7 分钟。订单库和库存库分属两个 MySQL 8.0 实例，团队半年前上了 XA，理由很正当：**超卖是资金事故，必须强一致**。
 
 - 00:07:12，订单服务在订单库 `XA PREPARE` 成功，库存库 `XA PREPARE` 也成功。协调者（订单服务 JVM）在写 commit 日志前遭遇一次 4.2 秒的 Full GC，紧接着被 K8s 滚动发布 `SIGKILL`。
 - 两个库的 XA 事务停在 `PREPARED`，**库存行锁不释放**。`XA RECOVER` 里躺着 **6,842 个 in-doubt 事务**。
-- 库存库 200 个连接，187 个被 XA 分支占住；新请求 90 秒内打满连接池，P99 涨到 30 秒。
-- 00:45 人工介入，逐个 `XA COMMIT` / `XA ROLLBACK`。但部分分支已被数据库超时回滚，另一些还锁着，现场出现两种脏数据：**订单已支付、库存没扣** 和 **库存扣了、订单没建**。
-- 01:26 恢复。38 分钟，12.6 万笔订单失败，直接损失 210 万元，1,900 笔需要人工修数。
+- 库存库 200 个连接很快被打满：新请求都卡在库存行锁上，P99 涨到 30 秒。（MySQL 8.0.28 及以前，PREPARED 分支还会占用原会话连接；8.0.29+ 默认 `xa_detach_on_prepare`，连接可复用，但行锁仍然不释放。）
+- 00:45 人工介入，逐个 `XA COMMIT` / `XA ROLLBACK`。**已 PREPARE 的分支不会因为超时自动回滚**，必须人工裁决；未走到 PREPARE 的分支则可能已按本地事务提交或回滚。现场因此出现两种脏数据：**订单已支付、库存没扣** 和 **库存扣了、订单没建**。
+- 01:26 恢复。79 分钟，12.6 万笔订单失败，直接损失 210 万元，1,900 笔需要人工修数。
 
 > 🩸 这不是 XA 的实现 bug，是 XA 的模型在互联网高并发下的必然结果：**它把「原子提交」做成了「跨网络的长时间锁」**。这一章把六种方案摆在一起，就是为了让你在架构评审上说清「为什么不用它」。
 
@@ -132,7 +132,7 @@
 | 维度 | 结论 |
 | --- | --- |
 | 一致性强度 | 强一致；提交完成前外部看不到中间态 |
-| 性能成本 | 多 2 次网络往返；**从 prepare 到 commit 全程持锁、占连接**；热点行吞吐被锁时间卡死 |
+| 性能成本 | 多 2 次网络往返；**从 prepare 到 commit 全程持锁**；连接占用看版本（8.0.28- 占原会话，8.0.29+ 默认 `xa_detach_on_prepare`）；热点行吞吐被锁时间卡死 |
 | 适用边界 | 短事务（<100ms）、低并发、同厂商数据库、内部账务；链路里没有 MQ/第三方 |
 | 失败表现 | 协调者崩溃 → in-doubt，锁不释放；参与者超时 → 启发式提交/回滚；网络分区 → 长时间阻塞 |
 
@@ -198,9 +198,9 @@ public class InventoryTccImpl implements InventoryTcc {
     @Override
     public boolean tryDeduct(BusinessActionContext ctx, long skuId, int qty) {
         String xid = ctx.getXid();
-        // 幂等 + 防悬挂：同一 xid 只允许一条预留；CANCELLED 的 xid 不允许再 Try
-        if (mapper.exists(xid)) return true;
+        // 幂等 + 防悬挂：先判 CANCELLED 墓碑，再判已存在的预留
         if (mapper.isCancelled(xid)) return false;
+        if (mapper.exists(xid)) return true;
         return mapper.insertReservation(xid, skuId, qty, "FROZEN") == 1;
     }
 
@@ -392,8 +392,8 @@ func NotifyWithRetry(ctx context.Context, task NotifyTask) error {
 **结论不是「强一致不好」，而是「XA 把强一致的代价付在了最热的那一行上」**：
 
 1. **锁持有时间 = 业务 SQL + 两次网络往返 + 协调者决策**。夹一次 RPC 就从毫秒变几百毫秒；30,000 TPS 下，热点行直接变成串行队列。
-2. **连接被占住**。200 个连接 ÷ 0.12s ≈ 1,666 TPS；要扛 30,000 TPS，光连接就要 18 个库。
-3. **协调者单点**。协调者一挂，所有 prepared 分支都卡住；commit 决定必须唯一，加高可用也没用。8.1 的 38 分钟就是这么来的。
+2. **热点行的锁被占住**。200 个连接 ÷ 0.12s ≈ 1,666 TPS（8.0.28- 且连接被占的口径）；要扛 30,000 TPS，光连接就要 18 个库。8.0.29+ 连接可 detach，但行锁仍在，热点行照样串行。
+3. **协调者单点**。协调者一挂，所有 prepared 分支都卡住；commit 决定必须唯一，加高可用也没用。8.1 的 79 分钟就是这么来的。
 4. **覆盖不了外部世界**。支付、发券、短信、第三方 API 没有 XA 接口；有一个，2PC 就不是端到端。
 5. **最终一致的异常率可以算**。0.2% 补偿率、99.5% 自动补偿成功率，每天 1,000 万笔有 100 笔需要人工；而 XA 的 in-doubt 是一次几千笔同时卡住。**前者是运营问题，后者是可用性问题。**
 
@@ -425,7 +425,10 @@ func (e *Executor) RunStep(ctx context.Context, runID, stepID string, tool Tool,
 	result, err := tool.Call(ctx, args)                                  // 外部副作用，不可回滚
 	return e.repo.InTx(ctx, func(tx *sql.Tx) error {
 		if err != nil {
-			return e.repo.MarkFailed(tx, stepID, err.Error())            // 失败也要留痕
+			if merr := e.repo.MarkFailed(tx, stepID, err.Error()); merr != nil {
+				return merr
+			}
+			return fmt.Errorf("step %s failed: %w", stepID, err) // 失败必须向上传播
 		}
 		if err := e.repo.SaveResult(tx, stepID, result); err != nil { return err }
 		return e.outbox.Insert(tx, Event{
@@ -558,7 +561,7 @@ seata:
 | 可靠消息 | 最终一致的主力；难点是「提交与发送的原子性」 |
 | Outbox | 把发消息变成写本地表；与业务同事务；至少一次投递 |
 | 最大努力通知 | 只承诺尽力 + 可查 + 可补；必须配对账 |
-| 为什么不用 XA | 锁持有 120ms → 热点 SKU 8 TPS；200 连接只能扛 1,666 TPS；协调者挂 → 锁 38 分钟 |
+| 为什么不用 XA | 锁持有 120ms → 热点 SKU 8 TPS；200 连接只能扛 1,666 TPS；协调者挂 → 锁 79 分钟 |
 | 最终一致四件套 | Outbox 不丢 + 幂等不重 + 补偿能回 + 对账能发现 |
 | Agent 侧 | 2PC 出局；Step 级本地事务 + Outbox + Saga 补偿 + 检查点 + token 对账 |
 | 不做会怎样 | 不是「慢一点」，是「一次故障几千笔同时卡死」或「账悄悄错了没人知道」 |

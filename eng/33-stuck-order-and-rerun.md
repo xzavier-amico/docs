@@ -6,7 +6,7 @@
 
 ---
 
-## 33.1 事故现场：3,417 笔退款卡了 9 天，然后被一条 SQL 改成"成功"
+## 33.1 事故现场：3,417 笔退款卡了 7 天，然后被一条 SQL 改成"成功"
 
 ### 事故一：没有"停留时长"这个指标
 
@@ -22,8 +22,8 @@
 | 09:30 | 客服主管在群里 @ 值班，无人应答（值班在看另一条支付告警） |
 | 10:05 | 值班查监控：`refund_success_total` 确实掉了，但告警规则是"失败率 > 5%"——**失败的请求根本没发生，是"没有请求"** |
 | 10:40 | 发现 worker 在 CrashLoop，重启并回滚镜像 |
-| 11:00 | 链路恢复。积压 3,417 笔进入人工复核队列，按 200 笔/小时处理 |
-| 8/12~8/18 | 逐日消化，最老一笔卡了 **9 天 4 小时** |
+| 11:00 | 链路恢复。积压 3,417 笔进入人工复核队列，按 20 笔/小时处理 |
+| 8/12~8/18 | 逐日消化，最老一笔卡了 **7 天** |
 | 8/31 | 财务月结：**218 万元**退款"应退未退"（钱在平台账上，用户没收到） |
 
 最终：客服工单 **1,240 张**，延迟赔付 3.6 万元，监管报备一次。
@@ -68,7 +68,7 @@ UPDATE refund_order
 >
 > **重跑（rerun）**：用**同一个业务键**、从**同一个逻辑步骤**重新执行一次推进。它不是"重新发起"——重跑不会产生新的业务单号。
 >
-> **跳过（skip）**：用一个**外部裁定**（人的判断、上游的补偿、数据修复）替代某一步的实际执行，并把状态推进到"视为完成"。
+> **跳过（skip）**：用一个**外部裁定**（人的判断、上游的补偿、数据修复）替代某一步的实际执行，**打上 SKIP 标记并建补偿任务**；聚合状态默认不前进，由补偿任务完成后决定。
 
 风险等级完全不同：
 
@@ -76,7 +76,7 @@ UPDATE refund_order
 | --- | --- | --- | --- | --- |
 | **发现（巡检）** | 只读 + 告警 | 不涉及 | 低（误报浪费人力） | 机器，自动 |
 | **重跑** | 重新执行一次，可能产生副作用 | **可逆**（幂等前提下等价于没发生） | 中（幂等没做好就翻倍） | 机器/人，需幂等前置 |
-| **跳过** | 状态前进但副作用没发生 | **不可逆**（除非有补偿任务） | 高（账实不符） | 人，需审批 + 审计 |
+| **跳过** | 打 SKIP 标记 + 建补偿任务；聚合状态默认不前进 | **不可逆**（除非补偿完成） | 高（账实不符） | 人，需审批 + 审计 |
 | **强制改状态** | 直接 UPDATE | **不可逆且无痕迹** | **极高** | **不应该存在这个动作** |
 
 ### 四个反例：这些都不是你以为的那件事
@@ -403,7 +403,7 @@ func (s *Scanner) Run(ctx context.Context) {
 **Java：单笔 + 批量 + dry-run 一体**
 
 ```java
-public record RerunPlan(long id, String state, String action,
+public record RerunPlan(long id, String state, long version, String action,
                         boolean executable, String blockedBy) {}
 
 public record RerunResult(long id, String outcome, String detail) {}
@@ -424,22 +424,23 @@ public class RerunService {
         Map<String, Object> o = jdbc.queryForMap(
             "SELECT status, version, updated_at FROM refund_order WHERE id = ?", id);
         String state = (String) o.get("status");
+        long version = ((Number) o.get("version")).longValue();
 
         if (Set.of("REFUNDED", "REFUND_FAILED", "CANCELLED").contains(state)) {
-            return new RerunPlan(id, state, "NONE", false, "TERMINAL_STATE");
+            return new RerunPlan(id, state, version, "NONE", false, "TERMINAL_STATE");
         }
         // 关键：太"新"的单不要动，可能正在被正常推进（避免双写）
         Timestamp updated = (Timestamp) o.get("updated_at");
         if (updated.after(new Timestamp(System.currentTimeMillis() - 120_000))) {
-            return new RerunPlan(id, state, "NONE", false, "TOO_FRESH_MAYBE_IN_FLIGHT");
+            return new RerunPlan(id, state, version, "NONE", false, "TOO_FRESH_MAYBE_IN_FLIGHT");
         }
         Integer lease = jdbc.queryForObject(
             "SELECT COUNT(*) FROM outbox WHERE aggregate_id = ? AND status = 'SENDING'",
             Integer.class, id);
         if (lease != null && lease > 0) {
-            return new RerunPlan(id, state, "NONE", false, "OUTBOX_IN_FLIGHT");
+            return new RerunPlan(id, state, version, "NONE", false, "OUTBOX_IN_FLIGHT");
         }
-        return new RerunPlan(id, state, "REPLAY_REFUND_STEP", true, "");
+        return new RerunPlan(id, state, version, "REPLAY_REFUND_STEP", true, "");
     }
 
     /** 执行单笔：独立事务 + 幂等键 + 审计。批量时逐笔调用，一笔失败不影响其他。 */
@@ -460,11 +461,14 @@ public class RerunService {
                 if (n == 0) {                       // 已存在 → 之前跑过
                     return new RerunResult(id, "DUPLICATE", idemKey);
                 }
-                jdbc.update("""
+                int updated = jdbc.update("""
                     UPDATE refund_order
                        SET state = 'REFUNDING', version = version + 1, updated_at = NOW(3)
                      WHERE id = ? AND version = ? AND state = ?
-                    """, id, plan(id), p.state());   // 条件更新：状态/版本必须没变
+                    """, id, p.version(), p.state());   // 条件更新：状态/版本必须没变
+                if (updated != 1) {
+                    throw new IllegalStateException("state/version changed: " + id);
+                }
                 audit.record(operator, "RERUN", id, p.state(), "REFUNDING",
                              reason, idemKey, null);
                 return new RerunResult(id, "OK", idemKey);
@@ -851,7 +855,7 @@ kubectl scale deploy/refund-worker --replicas=2
 for i in $(seq 1 10); do
   curl -sS -X POST http://ops.internal/api/rerun \
     -H 'Content-Type: application/json' \
-    -d "{\"id\":88421,\"operator\":\"test\",\"reason\":\"idempotency-check\",\"batchNo\":\"idem-$i\"}" \
+    -d "{\"id\":88421,\"operator\":\"test\",\"reason\":\"idempotency-check\",\"batchNo\":\"idem-fixed\"}" \
     | jq -c '{outcome,detail}'
 done
 

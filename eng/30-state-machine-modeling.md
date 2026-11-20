@@ -250,6 +250,9 @@ func Replay(events []Event) (Order, error) {
             if err := json.Unmarshal(e.Payload, &p); err != nil { return o, err }
             o.PaidAmount += p.Amount
             o.Status = "PAID"
+        case "RefundRequested":
+            if o.Status != "PAID" && o.Status != "REFUND_FAILED" { return o, ErrIllegalTransition }
+            o.Status = "REFUNDING"
         case "RefundSucceeded":
             if o.Status != "REFUNDING" { return o, ErrIllegalTransition }
             o.Status = "REFUNDED"
@@ -318,7 +321,7 @@ public TransitionPlan plan(String machine, int version, String from,
 machine: order
 version: 3
 initial: CREATED
-terminal: [REFUNDED, CANCELLED, CLOSED]
+terminal: [REFUNDED, CANCELLED]
 transitions:
   - from: CREATED
     event: PAY_SUBMITTED

@@ -37,9 +37,9 @@
 
 > 🩸 **本章最贵的一条**：**压测必须模拟「同一个业务意图的重复」，而不是「N 个不同业务意图的并发」。** 前者验证幂等，后者只验证吞吐。大部分团队的幂等测试都测错了对象。
 
-### 事故二：24 小时的 TTL，撞上 26 小时的补发（2026-01-09）
+### 事故二：24 小时的 TTL，撞上 25 小时的补发（2026-01-09）
 
-同一家公司换了业务线（自动续费订阅），也换了人，但踩的是模式 2。把时间线摊开看，20 分钟里没有任何一行日志是 ERROR：
+同一家公司换了业务线（自动续费订阅），也换了人，但踩的是模式 2。把时间线摊开看，这 25 小时里没有任何一行日志是 ERROR：
 
 | 时间 | 事件 | 数据 |
 | --- | --- | --- |
@@ -177,7 +177,8 @@ CREATE TABLE idempotency_record (
 关键点：**先 `INSERT` 抢占，再干活**，而不是「先查再插」。查出来的「不存在」在并发下毫无意义。
 
 ```go
-// 复用第 7 章的 InTx 保证「占位 + 业务写 + 标 DONE」在同一事务
+// 占位用独立短事务（靠唯一键），业务写用另一个事务；
+// 失败时 release/租约清理。若同库要求原子，可把 claim 改成接收 tx 并放进 InTx。
 func (s *IdemService) Do(ctx context.Context, scope, clientToken string,
 	fn func(context.Context, *sql.Tx) (any, error)) (resp any, replayed bool, err error) {
 
@@ -196,10 +197,12 @@ func (s *IdemService) Do(ctx context.Context, scope, clientToken string,
 		}
 	}
 
+	var out any
 	err = s.tx.InTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		out, e := fn(ctx, tx) // 业务写：与占位同一事务
+		var e error
+		out, e = fn(ctx, tx) // 业务写：独立事务；占位已在 claim 提交
 		if e != nil {
-			return e // 一起回滚 → 占位消失，下次重试可重新接管（模式 6 的正解）
+			return e // 业务回滚；下面 release 清掉占位（或等租约过期）
 		}
 		return s.markDone(ctx, tx, scope, keyHash, out)
 	})
@@ -207,7 +210,7 @@ func (s *IdemService) Do(ctx context.Context, scope, clientToken string,
 		_ = s.release(ctx, scope, keyHash) // 只对「可判定失败」的异常释放，未知异常留租约
 		return nil, false, err
 	}
-	return resp, false, nil
+	return out, false, nil
 }
 
 func (s *IdemService) claim(ctx context.Context, scope, keyHash string) (Record, bool, error) {
@@ -425,7 +428,7 @@ ALTER TABLE idempotency_record DROP PARTITION p202601;
 
 | # | 模式 | 现象（现场长什么样） | 根因 | 怎么查（日志·指标·SQL） | 怎么修 | 怎么防复发 |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | **幂等键含可变字段** | 同一业务重复 2~5 条，每次键都不同 | 键里带 `timestamp`/`trace_id`/`update_time`/随机数/prompt hash | 日志里并排打两次的键逐字段 diff；`SELECT user_id,sku_id,COUNT(DISTINCT idem_key) FROM orders GROUP BY 1,2 HAVING 2>1`；指标：命中率从 12% 掉到 0.3% | 键只用「客户端稳定 token + scope」；版本显式进键 | 键 schema 单测：同一请求重放 10 次，键必须相同；键定义进设计文档模板 |
+| 1 | **幂等键含可变字段** | 同一业务重复 2~5 条，每次键都不同 | 键里带 `timestamp`/`trace_id`/`update_time`/随机数/prompt hash | 日志里并排打两次的键逐字段 diff；`SELECT user_id, sku_id, COUNT(*) rows_cnt, COUNT(DISTINCT request_id) key_cnt FROM orders GROUP BY user_id, sku_id HAVING key_cnt > 1`；指标：命中率从 12% 掉到 0.3% | 键只用「客户端稳定 token + scope」；版本显式进键 | 键 schema 单测：同一请求重放 10 次，键必须相同；键定义进设计文档模板 |
 | 2 | **TTL 太短** | 重复间隔 > TTL 时开始重复，多见于跨天 | TTL 小于渠道/网关最大重试窗口 | `SELECT MIN(created_at),MAX(created_at) FROM 重复单`；指标 `idempotency_age_at_hit` 逼近 TTL 就有风险 | 把 `expire_at` 落到表里并按「渠道 SLA 最大重试 72h × 2 = 7 天」配 | TTL 与重试策略同源配置（一份 YAML 同时生成重试参数和 TTL），改一个必改另一个 |
 | 3 | **先查后写窗口** | 200 并发下出 2~5 条，压测单并发永远复现不了 | `if (!exists) insert`；查主库/从库不一致 | `SELECT idem_key,COUNT(*) c FROM t GROUP BY 1 HAVING c>1`；从库延迟指标 `Seconds_Behind_Master` | 唯一索引 + `INSERT` 抢占，删除所有 check-then-act | 代码扫描禁 `exists` + `insert` 相邻出现；集成测试强制 200 并发 |
 | 4 | **跨库不同步** | 幂等表 DONE、业务表没记录（或反之），接口 200 但查不到单 | 幂等表在 Redis/独立库，与 MySQL 业务表无同事务 | `idempotency_record LEFT JOIN orders ON request_id=key` 查出单边；Redis `TTL` 与 MySQL 行数比对 | 同库同事务；跨库则改「状态机 + 补偿 + 对账」，禁止先写幂等表 | 事务边界图画进设计文档；跨库必须写「差异由哪次对账兜」 |
@@ -469,6 +472,9 @@ ALTER TABLE idempotency_record DROP PARTITION p202601;
 // k6 run -e BASE=http://order.internal ./idem-200.js
 import http from 'k6/http';
 import { check } from 'k6';
+
+// 409/425 是幂等/并发保护的正常响应，不能被算成 http_req_failed
+http.setResponseCallback(http.expectedStatuses(200, 201, 409, 425));
 
 export const options = {
   scenarios: {
@@ -575,9 +581,12 @@ HAVING rows_cnt > 1
  ORDER BY rows_cnt DESC LIMIT 50;
 
 -- ② 幂等表与业务表不一致（模式 4/6）
+-- key_hash = sha256(scope|client_token)，不能直接和原始 request_id 等值 join
 SELECT i.scope, i.status, COUNT(*) AS cnt
   FROM idempotency_record i
-  LEFT JOIN orders o ON o.request_id = i.key_hash
+  LEFT JOIN orders o
+    ON o.request_id IS NOT NULL
+   AND i.key_hash = SHA2(CONCAT(i.scope, '|', o.request_id), 256)
  WHERE i.created_at >= NOW() - INTERVAL 1 DAY
    AND i.scope = 'order:create'
    AND ((i.status = 'DONE' AND o.id IS NULL)      -- 说成功但没单
@@ -641,7 +650,7 @@ SELECT i.scope, i.status, COUNT(*) AS cnt
 ## 5.11 延伸阅读
 
 - MySQL 官方手册：`InnoDB` 唯一索引与 `INSERT ... ON DUPLICATE KEY UPDATE` 的加锁行为（以你使用的 8.0.x 版本为准）
-- Stripe API 文档 *Idempotent requests*：`Idempotency-Key` 的 24h 窗口、并发冲突返回 409、同键不同 payload 返回 422 的语义，是业界最清晰的一份契约
+- Stripe API 文档 *Idempotent requests*：`Idempotency-Key` 的 24h 窗口、并发冲突返回 409、同键不同 payload 返回 400（IETF 草案用 422）的语义，是业界最清晰的一份契约
 - Chaos Mesh 文档：`PodChaos` / `NetworkChaos` / `HTTPChaos` 的 YAML 字段
 - k6 文档：`per-vu-iterations` / `shared-iterations` 两种 executor 的差别（本章脚本用的是前者）
 - 上一章：[4. 订单场景全套：下单、支付回调、退款、库存](4-idempotency-order-scenarios.md)

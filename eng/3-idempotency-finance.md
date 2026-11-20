@@ -339,7 +339,7 @@ COMMIT;
 2. **可重现**：任意时点的余额 = 该时点之前所有分录的净额。改了历史分录，历史余额就重算不出来。
 3. **对账**：渠道文件里的流水是「发生过」的事实，内部账改成「应该发生」的样子，差异就永远对不上。
 4. **幂等**：UPDATE 不是天然重复安全的；冲正有独立的 `entry_no` 与 `request_id:REV`，重复执行会被唯一键挡住。
-5. **合规**：金融账本属于会计档案，保留期通常 5~10 年，删改是违规。
+5. **合规**：金融账本属于会计档案。按中国《会计档案管理办法》，会计凭证/账簿保管 **30 年**，年度财务报告永久；境外辖区按当地法规。删改是违规。
 
 > 🩸 真实事故：某平台为了「省事」，发现重复分录后直接 `DELETE` 了 2,000 条。三个月后监管检查，渠道流水与内部账差了 380 万，既证明不了「删的是重复」，也证明不了「没多删」，最后按少记收入处理。
 
@@ -399,7 +399,7 @@ WHERE c.status = 'SUCCESS' AND j.id IS NULL;
 SELECT j.entry_no, j.request_id, j.amount
 FROM journal_entry j
 LEFT JOIN channel_txn c
-  ON c.our_request_id = j.request_id AND c.channel = 'ALIPAY'
+  ON c.our_request_id = j.request_id
 WHERE j.biz_type = 'PAY' AND c.id IS NULL;
 
 -- 金额不一致
@@ -557,13 +557,13 @@ HAVING diff <> 0 OR line_count < 2;
 
 ```sql
 SELECT b.account_no, b.balance,
-       COALESCE(SUM(CASE WHEN l.direction='D' THEN l.amount ELSE -l.amount END), 0) AS ledger_balance
+       COALESCE(SUM(CASE WHEN l.direction='C' THEN l.amount ELSE -l.amount END), 0) AS ledger_balance
 FROM account_balance b
 LEFT JOIN journal_line l ON l.account_no = b.account_no
 WHERE b.account_no = 'USER_1001'
 GROUP BY b.account_no, b.balance
 HAVING b.balance <> ledger_balance;
--- 期望：0 行。注意借贷方向要与余额定义一致。
+-- 期望：0 行。本表按负债/权益口径「贷增借减」；资产类科目符号相反，需按 account_type 取符号。
 ```
 
 **并发验证**：200 个并发打同一个 `request_id`，然后跑第一条 SQL：

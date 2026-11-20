@@ -26,7 +26,7 @@
 
 ### 事故二：一次 `DELETE` 把幂等表锁了 4 小时（2025-12-18）
 
-幂等表积到 9.4 亿行，DBA 按惯例跑清理：`DELETE FROM idempotency_record WHERE created_at < '2025-09-01' LIMIT 5000000`。单事务 500 万行，执行 4 小时 8 分钟仍未结束（`EXPLAIN` 估算要 6 小时），期间二级索引与主键间隙被大量锁定。
+幂等表积到 9.4 亿行，DBA 按惯例跑清理：`DELETE FROM idempotency_record WHERE created_at < '2025-09-01' LIMIT 5000000`。单事务 500 万行，执行 4 小时 8 分钟仍未结束（`EXPLAIN` 只能看扫描行数与执行计划，估不出实际耗时），期间二级索引与主键间隙被大量锁定。
 
 | 时间 | 事件 | 数据 |
 | --- | --- | --- |
@@ -63,7 +63,7 @@
 | --- | --- | --- |
 | 拦住了多少？ | 幂等命中率 | `hit / (hit + miss)`，按 scope 拆 |
 | 重复从哪来？ | 重复请求率 | 每个业务意图平均到达次数 − 1，按来源层拆 |
-| 保护机制还活着吗？ | 去重失败率 | `conflict + store_error` 占判定总数的比例 |
+| 保护机制还活着吗？ | 去重失败率 | `store_error` 占判定总数；`conflict` 单列（保护生效，不是失败） |
 | 会不会涨爆？ | 幂等表水位与日增 | 行数、字节、`PROCESSING` 年龄、最老记录年龄 |
 
 ---
@@ -127,8 +127,12 @@ sum by (scope) (rate(idempotent_request_total{result="hit"}[5m]))
   /
 sum by (scope) (rate(idempotent_request_total{result=~"hit|miss"}[5m]))
 
-# 去重失败率：冲突 + 存储错误（>0.1% 就是保护机制在漏）
-sum(rate(idempotent_request_total{result=~"conflict|error"}[5m]))
+# 去重失败率：只算存储错误（>0.1% 就是保护机制在漏）
+sum(rate(idempotent_request_total{result="error"}[5m]))
+  / sum(rate(idempotent_request_total[5m]))
+
+# 在飞重复率：conflict 是「他人在飞」，保护机制正常，单独看
+sum(rate(idempotent_request_total{result="conflict"}[5m]))
   / sum(rate(idempotent_request_total[5m]))
 
 # 重试放大系数：入口 QPS ÷ 唯一业务意图数（miss 数近似唯一意图数）
@@ -419,7 +423,7 @@ public <T> T inTransaction(TransactionTemplate tx, String scope, String keyHash,
 | **Sentinel** | 热点参数限流（`ParamFlowRule`）、熔断 | 幂等：限流是「少放几个」，不是「只放一个」 | 互补，不替代 |
 | **APISIX / Envoy / Nginx** | 限流、路由、header 透传/改写 | 幂等语义插件（网关无法理解业务键） | 可做粗粒度防重放 |
 | **Temporal** | `WorkflowID` 唯一性 + 事件重放（`WorkflowIDReusePolicy`） | 外部副作用的幂等（工具调用仍需自己保证） | 长流程场景最好的底座 |
-| **Stripe 语义（参考实现）** | `Idempotency-Key` 24h、并发 409、同键不同 payload 422 | 你的业务键设计 | **业界最值得抄的契约** |
+| **Stripe 语义（参考实现）** | `Idempotency-Key` 24h、并发 409、同键不同 payload → 4xx（400 系） | 你的业务键设计 | **业界最值得抄的契约** |
 | **自研 SDK** | 键规范、注解/中间件、埋点、冲突策略 | — | 团队 ≥3 个写服务时值得做 |
 
 以各项目当前版本文档为准；上表的判断依据是「它管不管你的业务意图」。
@@ -476,16 +480,12 @@ groups:
     interval: 30s
     rules:
       - alert: IdempotencyHitRatioDrop
-        # 相对基线：命中率 < 近 7 天同小时的 30%，且绝对值 < 5%
+        # 绝对命中率 <5% 持续 5 分钟；低流量 scope 可在此基础上再加相对基线
         expr: |
           (
             sum by (scope) (rate(idempotent_request_total{result="hit"}[10m]))
             / sum by (scope) (rate(idempotent_request_total{result=~"hit|miss"}[10m]))
-          )
-          < 0.3 * avg_over_time(
-              (sum by (scope) (rate(idempotent_request_total{result="hit"}[10m]))
-               / sum by (scope) (rate(idempotent_request_total{result=~"hit|miss"}[10m])))[7d:10m]
-            )
+          ) < 0.05
         for: 5m
         labels: { severity: P2, team: platform }
         annotations:
@@ -574,7 +574,9 @@ echo "idempotent_* series 总数: $series  (阈值 5000)"
 hit=$(q 'sum(rate(idempotent_request_total{result="hit"}[5m]))')
 miss=$(q 'sum(rate(idempotent_request_total{result="miss"}[5m]))')
 echo "hit=$hit miss=$miss"
-[ "$((hit+miss))" -gt 0 ] || { echo "FAIL: 5 分钟内没有任何幂等判定，埋点可能没生效"; exit 1; }
+if ! awk -v h="$hit" -v m="$miss" 'BEGIN { exit !(h + m > 1e-9) }'; then
+  echo "FAIL: 5 分钟内没有任何幂等判定，埋点可能没生效"; exit 1
+fi
 
 stuck=$(q 'sum(idempotency_record_stuck{status="PROCESSING"})')
 echo "PROCESSING 卡住: $stuck (阈值 100)"
@@ -595,12 +597,12 @@ SELECT table_name,
   FROM information_schema.tables
  WHERE table_schema = 'order_db' AND table_name = 'idempotency_record';
 
--- 卡单与最老记录年龄：只扫最近 1 天（走 idx_status_updated），全表扫描会锁到 DBA 来找你
+-- 卡单与最近记录年龄：只扫最近 24 小时（需 idx_status_created(status, created_at)）
 SELECT status,
        COUNT(*)                                        AS cnt,
        TIMESTAMPDIFF(SECOND, MIN(updated_at), NOW(3))  AS oldest_age_sec
   FROM idempotency_record
- WHERE created_at >= CURDATE() - INTERVAL 1 DAY
+ WHERE created_at >= NOW() - INTERVAL 1 DAY
  GROUP BY status;
 
 -- 精确行数只每小时算一次，或直接用分区元数据（推荐）
@@ -688,7 +690,7 @@ k6 run -e BASE=http://order.internal ./idem-200.js
 
 - OpenTelemetry 规范：*Semantic Conventions* 与 `SpanKind`/`SpanStatus` 语义；Collector `tail_sampling` processor 的 `policy_type: string_attribute`（以你使用的版本为准）
 - Prometheus 文档：`histogram_quantile`、`rate()` 对 Counter 重置的处理、`predict_linear`
-- Stripe API 文档 *Idempotent requests*：24 小时窗口、并发 409、同键不同 payload 422 —— 最清晰的对外契约
+- Stripe API 文档 *Idempotent requests*：24 小时窗口、并发 409、同键不同 payload 400（IETF 草案用 422）—— 最清晰的对外契约
 - Micrometer 文档：`Counter`/`Gauge`/`Timer` 的命名与 `publishPercentileHistogram`
 - 上一章：[5. 幂等的失效模式与测试：10 种翻车方式](5-idempotency-failure-modes.md)
 - 下一章：[7. 本地事务：ACID 的真实边界与框架陷阱](7-local-transaction-pitfalls.md)

@@ -10,7 +10,7 @@
 
 **事故一：重复发券 8,600 张，损失 43 万元（2025-03-12）**
 
-会员日 20:00，营销服务发券接口 QPS 冲到 1,200。`CouponService.grant()` 上标了 `@Transactional`，但真正需要原子性的是它内部调用的 `this.insertCoupon()` —— 同类自调用不过代理，注解形同注释。三条 `INSERT` 各自自动提交，而券表的 `(user_id, batch_id)` 唯一索引当时因为「先上线再补」没建。网关超时重试 + 客户端重试让同一请求进来两次。
+会员日 20:00，营销服务发券接口 QPS 冲到 1,200。`CouponService` 的定时批处理 `batchGrant()` 直接 `this.grant()` 调用——同类自调用绕过代理，`grant()` 上的 `@Transactional` 从未生效；里面的三条 `INSERT` 各自自动提交，而券表的 `(user_id, batch_id)` 唯一索引当时因为「先上线再补」没建。网关超时重试 + 客户端重试让同一请求进来两次。
 
 结果：8,600 张 50 元券重复发放，直接损失 43 万元，T+1 与财务对账才发现，客诉 213 起。**根因不是并发的错，是「事务从没生效」加「没有唯一索引兜底」的叠加。**
 
@@ -20,7 +20,7 @@
 
 **事故三：受检异常不回滚，库存扣了订单没建（2025-09-02）**
 
-下单链路在同一个本地事务里写 `orders` 和 `order_items`，最后调用 `couponFacade.verify()`，该方法签名 `throws CouponExpiredException`。Spring 默认只对 `RuntimeException` 和 `Error` 回滚，受检异常被抛出后**事务照样提交**。当天 37 笔订单只落了一半数据，订单表有主记录、明细表为空，履约系统 3 小时后才发现。
+下单链路在同一个本地事务里写 `orders` 和 `order_items`，最后调用 `couponFacade.verify()`，该方法签名 `throws CouponExpiredException`。Spring 默认只对 `RuntimeException` 和 `Error` 回滚，受检异常被抛出后**事务照样提交**。当天 37 笔订单在优惠券已过期的情况下仍然落库并进入履约，3 小时后才发现。
 
 > 🎯 三个事故没有一个是「数据库坏了」。全部是**你以为事务管住了它，其实没有**。这一章就是把「以为」变成「确定」。
 
@@ -219,7 +219,7 @@ MySQL InnoDB 默认 `REPEATABLE READ`。**关键区分是「快照读」和「�
 | READ UNCOMMITTED | 脏读 | 加锁 | 有 | 有 | 永不使用 |
 | **READ COMMITTED** | 每条语句一个新快照 | 加锁，无间隙锁 | **有**（同一事务两次读到不同行集） | **有** | **互联网业务首选**：间隙锁少、并发高、死锁率低 |
 | **REPEATABLE READ**（MySQL 默认） | 事务级快照 | 加锁 + 间隙锁 | 快照读无，当前读无（被锁挡住） | **有** | 金融账务、需要读一致性的事务 |
-| SERIALIZABLE | 隐式加读锁 | 加锁 | 无 | 有（但会被锁串行化） | 只在极小热点上短期使用 |
+| SERIALIZABLE | 隐式加读锁 | 加锁 | 无 | 无（读加共享锁，写会互斥/死锁回滚） | 只在极小热点上短期使用 |
 
 > 🩸 **最容易被误解的一点**：RR **不防丢更新**。两个事务先 `SELECT balance=100`，再各自 `UPDATE account SET balance=110`，RR 下第二个事务照样把第一个的更新覆盖掉——因为它写的是**绝对值**。解法只有三个：`UPDATE ... SET balance = balance - 50 WHERE balance >= 50`（表达式写）、乐观锁 `WHERE version = ?`、`SELECT ... FOR UPDATE` 悲观锁。详见第 4 章幂等与库存扣减。
 
@@ -268,9 +268,10 @@ SET SESSION innodb_lock_wait_timeout = 3;
 
 UPDATE sku
    SET price = price * 1.05, version = version + 1
- WHERE batch_id = 20250708 AND id > 0 AND id <= 500
+ WHERE batch_id = ? AND id > ?
+ ORDER BY id
  LIMIT 500;
--- 记录游标，下一批 id > 500；每批独立提交，批间 sleep 50ms
+-- 第一批 cursor=0；后续 cursor=上一批的 MAX(id)，每批独立提交，批间 sleep 50ms
 
 -- 查当前长事务（判断是否有人在拖库）
 SELECT trx_id, trx_state, trx_started,
@@ -371,7 +372,7 @@ void 抛异常后不应留下任何数据() {
 
 | 指标 | 阈值（经验值） | 说明 |
 | --- | --- | --- |
-| `innodb_row_lock_time_avg` | > 50 ms 报警 | 平均行锁等待 |
+| `rate(innodb_row_lock_time[1m]) / rate(innodb_row_lock_waits[1m])` | > 50 ms 报警 | 当前平均行锁等待（不是实例启动以来的累计均值） |
 | `longest_trx_age_seconds` | > 5 s 报警 | 自己写巡检：从 `innodb_trx` 采集 |
 | `hikaricp_connections_active / max` | > 85% 持续 30 s | 连接池即将打满 |
 | 事务 P99 耗时 | > 200 ms | 超过就该拆了 |

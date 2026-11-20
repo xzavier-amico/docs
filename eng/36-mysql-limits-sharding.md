@@ -140,6 +140,8 @@ InnoDB 页 16KB。非叶子节点一条索引项约 14B（8B 主键 + 6B 页指�
 | 分 16 库 64 表 | 6 人月 ≈ 60 万 | 2 名运维 80 万 + 机器 30 万 | 理论上无限，但热点仍在 |
 | TiDB 三副本 | 迁移 4 人月 ≈ 40 万 | 机器 45 万 + 平台 0.5 人 20 万 | 线性扩，但点查延迟 +1~2ms |
 
+> 注：一次性投入按「项目人月 10 万」估，年运维按「自有员工 40 万/人年」估；两者口径不同，只用于量级对比，不能直接相加当预算。
+
 > 💡 **结论**：**只有当「不拆就真的写不动/装不下」且「跨片改造业务能接受」同时成立，才拆。** 否则先升配 + 归档，把 18 个月买回来。
 
 ---
@@ -161,7 +163,7 @@ InnoDB 页 16KB。非叶子节点一条索引项约 14B（8B 主键 + 6B 页指�
 
 | 手段 | 做法 | 代价 | 适用 |
 | --- | --- | --- | --- |
-| **加盐** | 订单表按 `order_id % 10` 再散成 10 张子表，写入分散 | 查询要聚合 10 张表 | 写热点，读少 |
+| **加盐** | 订单表按 `order_id % 10` 再散成 10 张子表；同库只分散表锁，要降 CPU 必须分散到不同库/实例 | 查询要聚合 10 张表 | 写热点，读少 |
 | **二次分片** | 热点商家单独一组库，路由表标记 | 多一套路由与运维 | 热点稳定且可识别 |
 | **冷热分离** | 热 30 天留 MySQL，冷数据进 ES/ClickHouse | 跨存储查询 | 读多写少 |
 | **请求合并** | 同商家写请求批量提交 | 延迟上升 | 计数/库存类 |
@@ -182,6 +184,7 @@ func ShardOf(merchantID int64, shards int) int {
 }
 
 // 热点商家：订单再按 orderID 加盐散到 salts 张子表；查询时 fan-out 后归并
+// 注意：同库加盐只分散表锁，不降该实例 CPU；要降 CPU 需把盐分散到不同库/实例
 func TableOf(merchantID, orderID int64, shards, salts int) string {
 	base := ShardOf(merchantID, shards)
 	if isHotMerchant(merchantID) {
@@ -208,10 +211,11 @@ func isHotMerchant(id int64) bool { return id == 90001 } // 实际查配置中�
 **深分页是分片后的第一杀手**。`LIMIT 100000, 20` 在 64 个分片上等于每个分片扫 100020 行再丢弃，内存和 IO 都是 64 倍。正确做法是**游标分页**：
 
 ```sql
--- 每个分片执行同一条，应用层做 64 路归并（按 created_at, id 排序取前 20）
+-- 每个分片执行同一条（表名按分片替换），应用层 64 路归并取前 20；
+-- 带 user_id 的查询只命中一个分片，不需要归并。
 SELECT id, order_no, user_id, created_at
 FROM t_order_07
-WHERE user_id = 10086
+WHERE status = 10
   AND (created_at, id) < ('2026-03-01 00:00:00.000', 881234567890)
 ORDER BY created_at DESC, id DESC
 LIMIT 20;
@@ -226,11 +230,12 @@ CREATE TABLE t_order_by_phone (
   order_no   CHAR(26)     NOT NULL,
   user_id    BIGINT UNSIGNED NOT NULL,
   created_at DATETIME(3)  NOT NULL,
-  PRIMARY KEY (phone, created_at, order_no),
-  KEY idx_order_no (order_no)
+  PRIMARY KEY (user_id, created_at, order_no),
+  KEY idx_phone (phone, created_at)
 ) ENGINE=InnoDB;
 
--- 下单事务里同时写主表和冗余表；两张表必须同一个分片键路由（phone 与 user_id 同片）
+-- 下单事务里同时写主表和冗余表；两张表都按 user_id 路由，才能同库同事务。
+-- phone 查询先经 phone→user_id 目录（或全局索引）定位，再进同片；不要按 phone 路由。
 START TRANSACTION;
 INSERT INTO t_order (id, order_no, user_id, phone, status, total_amount, created_at)
 VALUES (?, ?, ?, ?, 10, ?, NOW(3));
@@ -366,8 +371,8 @@ func (s *Snowflake) Next() int64 {
 
 **Agent 特有的三个差异**：
 
-1. **事件表爆量**：一次 Run 平均 42 条 step event，100 万 Run/月 = **4,200 万行/月**，一年 5 亿行。它 append-only、按时间查、按 run 查，**分片键应该选时间（RANGE 分区）+ run_id 二级索引**，而不是照抄订单表的 `user_id` 哈希——因为你的查询是「某 Run 的全部事件」和「某时间段的统计」，不是「某用户的所有事件」。
-2. **delta 不落库**：流式输出的每个 token 增量都不要写库。只存最终 message + 首 token 时间 + token 数；否则一次 2,000 token 的回答会产生 2,000 次 UPDATE，写放大 **20~50 倍**。
+1. **事件表爆量**：一次 Run 平均 42 条 step event，100 万 Run/月 = **4,200 万行/月**，一年 5 亿行。它 append-only、按时间查、按 run 查。**按月 RANGE 分区 + 查询带时间范围**；MySQL 的分区索引是本地索引，单靠 `run_id` 二级索引会扫所有月分区。若必须只按 `run_id` 查，建 `run_id → month` 路由表，或改用支持全局索引的分布式库——不要照抄订单表的 `user_id` 哈希。
+2. **delta 不落库**：流式输出的每个 token 增量都不要写库。只存最终 message + 首 token 时间 + token 数；否则一次 2,000 token 的回答会产生 2,000 次 UPDATE，写次数放大 **2,000 倍**（按字节另算）。
 3. **prompt/大字段外置**：prompt 平均 8KB、工具结果 30KB，别放 MySQL 行内。DB 只存 `object_uri + sha256 + size`，正文进对象存储（第 40 章算过这笔账）。
 
 ```sql

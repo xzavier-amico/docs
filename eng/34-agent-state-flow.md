@@ -25,7 +25,7 @@
 | 09:41 | worker 重新领取。**但检查点没更新，最后一个 `llm.called` 对应的模型调用没有结果**，代码选择"重放这一步" |
 | 09:44 | 重放时上下文已经变了（新 prompt 版本），模型输出了不同的工具调用序列 |
 | 10:05 | **214 封客户邮件被第二次发出**（第一次的 `tool_call` 已成功，但结果没落检查点） |
-| 11:30 | 全部恢复。**累计 3,200 个 Run 平均卡 6 小时 12 分，214 次重复外发，37 起投诉，赔偿 8.6 万元** |
+| 11:30 | 全部恢复。**累计 3,200 个 Run 平均卡 7 小时 10 分以上（02:31→09:41 已是最短），214 次重复外发，37 起投诉，赔偿 8.6 万元** |
 
 三个根因，一条比一条深：
 
@@ -40,10 +40,10 @@
 | 时刻 | 事件 |
 | --- | --- |
 | 10/08 14:02:11 | 回调 #1 到达 `POST /callbacks/ocr`。handler 开始处理，写 checkpoint 时撞上另一个 job 持有的行锁，阻塞 |
-| 14:02:19 | 服务商 8 秒没收到 200，按策略（2s/4s/8s/16s/32s）重试 #2 |
-| 14:02:19~14:02:40 | #2~#6 全部到达。每个 handler 都执行 `SELECT * FROM run WHERE external_id = ?`，**因为 #1 还没提交，全部查不到** |
-| 14:02:40 | 6 个 handler 各自 `INSERT INTO run(...)` 新建了一个 Run，都用同一份合同、同一个 `external_id` |
-| 14:02:41~15:10 | 6 个 Run 并行分析同一份合同，**6 倍成本**（单次 ¥4.2 → ¥25.2） |
+| 14:02:13 | 服务商 2 秒没收到 200，按策略（2s/4s/8s/16s/32s）重试 #2 |
+| 14:02:13~14:03:13 | #2~#6 按累计退避（+2s/+6s/+14s/+30s/+62s）先后到达。每个 handler 都执行 `SELECT * FROM run WHERE external_id = ?`，**因为 #1 还没提交，全部查不到** |
+| 14:03:13 | 6 个 handler 各自 `INSERT INTO run(...)` 新建了一个 Run，都用同一份合同、同一个 `external_id` |
+| 14:03:14~15:10 | 6 个 Run 并行分析同一份合同，**6 倍成本**（单次 ¥4.2 → ¥25.2） |
 | 15:10 | 6 个 Run 全部完成，其中 2 个结论不一致（上下文采样不同） |
 | 15:30 | 下游取"最新一条"（`ORDER BY created_at DESC LIMIT 1`），取了其中一条 |
 | 16:20 | 客户投诉："你这个结论和我上一份合同自相矛盾" |
@@ -327,6 +327,8 @@ type TransitionReq struct {
 	Event      string
 	Actor      string     // user:123 / svc:worker / job:reaper
 	Reason     string
+	LeaseOwner string     // 当前持租约的 worker；防旧 worker 复活覆盖
+	FenceEpoch int64      // 租约代际，每次接管 +1
 	Patch      map[string]any // 同事务要写的字段：wait_reason / wake_deadline / result_ref
 }
 
@@ -348,18 +350,20 @@ func (s *Store) Transition(ctx context.Context, req TransitionReq) (err error) {
 			}
 		}
 		// 2) CAS：状态 + 版本 + 租约必须都还对得上
+		// 系统接管（reaper）要先用 CAS 抢到新的 lease_owner/fence_epoch，再以新租约调用 Transition。
 		sets, args := buildSet(req.Patch)
 		q := fmt.Sprintf(`UPDATE agent_run
 			SET state = ?, version = version + 1, state_seq = state_seq + 1,
 			    updated_at = NOW(3) %s
-			WHERE run_id = ? AND state IN (%s) AND version = ?`,
+			WHERE run_id = ? AND state IN (%s) AND version = ?
+			  AND lease_owner = ? AND fence_epoch = ? AND lease_until > NOW(3)`,
 			sets, placeholders(len(req.From)))
 		args = append([]any{req.To}, args...)
 		args = append(args, req.RunID)
 		for _, f := range req.From {
 			args = append(args, f)
 		}
-		args = append(args, req.ExpectVer)
+		args = append(args, req.ExpectVer, req.LeaseOwner, req.FenceEpoch)
 
 		res, err := tx.ExecContext(ctx, q, args...)
 		if err != nil {
