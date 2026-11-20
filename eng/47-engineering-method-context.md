@@ -56,7 +56,7 @@ components:
         refundId:
           type: integer
           format: int64
-          description: 退款单号（全局唯一，雪花 ID）
+          description: 退款单号（全局唯一，雪花 ID；示例为 10 位测试号，生产通常 18~19 位）
         status:
           type: string
           enum: [INIT, AUDITING, REFUNDING, SUCCESS, FAILED]
@@ -266,12 +266,12 @@ verify:
 ```json
 {
   "name": "get_refund",
-  "description": "按退款单号查询退款状态。退款单号是 18 位数字字符串。不存在时返回 code=NOT_FOUND（不要重试）。",
+  "description": "按退款单号查询退款状态。退款单号是 10~19 位数字字符串（示例为 10 位测试号，生产雪花 ID 通常 18~19 位）。不存在时返回 code=NOT_FOUND（不要重试）。",
   "parameters": {
     "type": "object",
     "required": ["refund_id"],
     "properties": {
-      "refund_id": { "type": "string", "pattern": "^[0-9]{18}$" }
+      "refund_id": { "type": "string", "pattern": "^[0-9]{10,19}$" }
     },
     "additionalProperties": false
   }
@@ -482,9 +482,9 @@ func TestRefundProvider(t *testing.T) {
         "description": "幂等键，UUID v4。同一次用户操作的所有重试必须复用同一个值。"
       },
       "order_id": {
-        "type": "integer",
-        "minimum": 1,
-        "description": "订单 ID（18 位整数），不是订单号字符串。"
+        "type": "string",
+        "pattern": "^[0-9]{18}$",
+        "description": "订单 ID（18 位数字字符串，避免 JSON 数值精度丢失；不是订单号）。"
       },
       "amount_cents": {
         "type": "integer",

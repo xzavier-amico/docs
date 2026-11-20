@@ -111,7 +111,7 @@ QPS（流量变了吗？）→ RT（哪个分位变慢了？）→ 错误率（�
 | 17 | **订单/任务卡在中间态** | 查 `WHERE status=? AND updated_at < now()-interval` | ① 事件丢失 ② 消费者挂 ③ 状态机缺转移 | 补发/重跑（第 33 章） |
 | 18 | **缓存与库不一致** | 抽样对比；看更新路径是否双写 | ① 先删缓存后写库 ② 并发读写 ③ 缓存未失效 | 清缓存；改双删/CDC（第 39 章） |
 | 19 | **数据库连接耗尽** | `SHOW PROCESSLIST`；看连接池 active/idle | ① 慢查询占连接 ② 连接泄漏 ③ 池配置过小 | kill 慢查询；扩池；限流 |
-| 20 | **主从延迟导致读到旧数据** | `SHOW SLAVE STATUS` 看 `Seconds_Behind_Master` | ① 大事务 ② 批量写 ③ 从库负载高 | 读主库；限流大事务 |
+| 20 | **主从延迟导致读到旧数据** | `SHOW REPLICA STATUS` 看 `Seconds_Behind_Source`（8.0.22+；旧版为 `SHOW SLAVE STATUS` / `Seconds_Behind_Master`） | ① 大事务 ② 批量写 ③ 从库负载高 | 读主库；限流大事务 |
 
 ### E 组 · 流量与依赖类（21-25）
 
@@ -185,7 +185,7 @@ Step 5  止血顺序：扩消费者（分区数够）→ 提高批量 → 跳过
 
 ```bash
 # 1. 找进程
-top -o cpu | head
+top -o %CPU | head                     # Linux；macOS 为 top -o cpu
 # 2. 找线程（Java）
 top -H -p <pid>
 printf '%x\n' <tid>            # 转 16 进制
@@ -328,13 +328,13 @@ ORDER BY time DESC LIMIT 10;"
 +------+-------+----------------+------+---------+------+------------------+----------------------------------+
 | id   | user  | host           | db   | command | time | state            | q                                |
 +------+-------+----------------+------+---------+------+------------------+----------------------------------+
-| 8123 | app   | 10.2.3.11:5321 | shop | Query   |  42  | Sending data     | SELECT ... FROM orders WHERE ...  |
-| 8124 | app   | 10.2.3.11:5322 | shop | Query   |  41  | Sending data     | SELECT ... FROM orders WHERE ...  |
-| 8099 | app   | 10.2.3.12:5310 | shop | Query   |  38  | Sending data     | SELECT ... FROM orders WHERE ...  |
+| 8123 | app   | 10.2.3.11:5321 | shop | Query   |  42  | Executing       | SELECT ... FROM orders WHERE ...  |
+| 8124 | app   | 10.2.3.11:5322 | shop | Query   |  41  | Executing       | SELECT ... FROM orders WHERE ...  |
+| 8099 | app   | 10.2.3.12:5310 | shop | Query   |  38  | Executing       | SELECT ... FROM orders WHERE ...  |
 +------+-------+----------------+------+---------+------+------------------+----------------------------------+
 ```
 
-**特征**：同一条 SQL、都在 `Sending data`（说明在扫行/回表），42 秒。
+**特征**：同一条 SQL、都处于 `Executing`（MySQL 8.0.17+ 已把原 `Sending data` 并入该状态，表示读行/回表），42 秒。
 
 ### 第 4~6 分钟：看执行计划与索引
 
@@ -391,7 +391,7 @@ mysql -e "SELECT COUNT(*) FROM orders WHERE user_id=88213 AND created_at >= '202
 ### Linux / 进程
 
 ```bash
-top -o cpu | head -15                 # CPU 进程
+top -o %CPU | head -15                 # CPU 进程（Linux）
 top -H -p <pid>                       # 线程级 CPU
 pidstat -p <pid> 1 5                  # 进程 CPU/IO
 vmstat 1 5                            # 上下文切换/内存
@@ -418,8 +418,8 @@ jstat -gcutil <pid> 1000 10                        # GC 频率
 ### Go
 
 ```bash
-kill -QUIT <pid>                                   # 打印全部 goroutine 栈
-curl localhost:6060/debug/pprof/goroutine?debug=2  # goroutine
+kill -QUIT <pid>                                   # 打印全部 goroutine 栈后退进程（exit 2），线上慎用
+curl localhost:6060/debug/pprof/goroutine?debug=2  # goroutine（在线抓栈优先用这个）
 curl localhost:6060/debug/pprof/heap > heap.out    # 堆
 go tool pprof -http=:8081 heap.out                 # 可视化
 curl "localhost:6060/debug/pprof/profile?seconds=30" > cpu.out
@@ -432,7 +432,7 @@ go tool pprof -http=:8082 cpu.out
 SHOW FULL PROCESSLIST;                              -- 当前查询
 SELECT * FROM information_schema.innodb_trx ORDER BY trx_started;  -- 长事务
 SHOW ENGINE INNODB STATUS\G                         -- 死锁/锁等待
-SHOW SLAVE STATUS\G                                 -- 主从延迟
+SHOW REPLICA STATUS\G                               -- 主从延迟（8.0.22+；旧版 SHOW SLAVE STATUS）
 SELECT * FROM performance_schema.events_statements_summary_by_digest
 ORDER BY SUM_TIMER_WAIT DESC LIMIT 10;              -- 慢 SQL 汇总
 ```
@@ -444,7 +444,7 @@ redis-cli --bigkeys
 redis-cli --hotkeys          # 需 maxmemory-policy=allkeys-lfu
 redis-cli INFO stats | grep -E "evicted|expired|keyspace"
 redis-cli SLOWLOG GET 10
-redis-cli CLIENT LIST | awk '{print $2}' | sort | uniq -c | sort -rn | head
+redis-cli CLIENT LIST | awk '{print $2}' | cut -d= -f2 | cut -d: -f1 | sort | uniq -c | sort -rn | head   # 按客户端 IP 聚合连接数
 ```
 
 ### Kafka

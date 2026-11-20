@@ -6,9 +6,9 @@
 
 ---
 
-## 42.1 事故现场：40 分钟，三个人同时重启，没人对外说话
+## 42.1 事故现场：42 分钟，连续重启，没人对外说话
 
-2025 年 6 月，某平台一次 P1（核心下单接口 5xx 达 37%）的真实时间线：
+2026 年 6 月，某平台一次 P1（核心下单接口 5xx 达 37%）的时间线（案例数字为示例）：
 
 | 时间 | 发生了什么 |
 | --- | --- |
@@ -161,6 +161,8 @@ CREATE TABLE incident (
     severity      ENUM('P0','P1','P2','P3') NOT NULL,
     status        ENUM('OPEN','MITIGATED','RECOVERED','CLOSED') NOT NULL,
     started_at    DATETIME(3) NOT NULL,
+    detected_at   DATETIME(3),                  -- 首次被发现（告警/客户/人工巡检）
+    acknowledged_at DATETIME(3),                -- 首次认领
     mitigated_at  DATETIME(3),
     recovered_at  DATETIME(3),
     closed_at     DATETIME(3),
@@ -253,7 +255,8 @@ KILL <id>;
 对外：客服话术见 §5
 
 ### 3.4 摘流
-kubectl -n prod label pod <pod> unhealthy=true   # 从 LB 摘除
+kubectl -n prod label pod <pod> app=order-api-unhealthy   # 仅当 Service selector 为 app=order-api 时才会摘除
+# 更通用的做法：让 readinessProbe 失败，或直接把该 Pod 从 Endpoints 摘除
 保留现场：jstack / pprof 先抓再重启
 
 ### 3.5 限流
@@ -419,14 +422,16 @@ kubectl -n prod label pod <pod> unhealthy=true   # 从 LB 摘除
 SELECT DATE_FORMAT(started_at,'%Y-%m') AS mon,
        severity,
        COUNT(*) AS cnt,
-       ROUND(AVG(TIMESTAMPDIFF(MINUTE, started_at, mitigated_at)),1) AS mttm_min,
+       ROUND(AVG(TIMESTAMPDIFF(MINUTE, started_at, detected_at)),1) AS mttd_min,
+       ROUND(AVG(TIMESTAMPDIFF(MINUTE, detected_at, acknowledged_at)),1) AS mtta_min,
+       ROUND(AVG(TIMESTAMPDIFF(MINUTE, acknowledged_at, mitigated_at)),1) AS mttm_min,
        SUM(detection='CUSTOMER')/COUNT(*) AS customer_detected_ratio
 FROM incident
 WHERE started_at >= DATE_SUB(NOW(), INTERVAL 6 MONTH)
 GROUP BY mon, severity ORDER BY mon DESC, severity;
 ```
 
-> 💡 **`customer_detected_ratio` 是最扎心的指标**：如果它 > 30%，说明你的监控在替客户「发现问题」。
+> 💡 **`customer_detected_ratio` 是最扎心的指标**：如果它 > 30%，说明客户在替你的监控「发现问题」——监控漏报了。
 
 ---
 
@@ -445,7 +450,7 @@ GROUP BY mon, severity ORDER BY mon DESC, severity;
 
 ## 42.9 实战：一次混沌演练的完整记录
 
-演练的价值在于**暴露 Runbook 与自动化里的窟窿**，而不是「证明系统很稳」。下面是一次真实的季度演练记录（已脱敏）。
+演练的价值在于**暴露 Runbook 与自动化里的窟窿**，而不是「证明系统很稳」。下面是一次季度演练的教学记录（时间线与数字为示例）。
 
 ```markdown
 # 演练记录：订单服务单实例故障 + Redis 主从切换
@@ -455,12 +460,12 @@ GROUP BY mon, severity ORDER BY mon DESC, severity;
 - 假设：验证「实例故障自动摘流 + 缓存降级」是否有效
 
 ## 时间线
-14:00  注入：kill order-api 的 pod-3（占 1/3 流量）
-14:00  告警触发（PodNotReady），自动摘流 12s 后生效
+14:00  注入：cordon node-7 + drain（该节点上有 order-api 的 pod-3，占 1/3 流量）
+14:00  告警触发（PodNotReady），流量 12s 内切到其余副本
 14:01  A 认领，确认错误率 0.4%（未超阈值）
-14:03  发现 pod-3 未自动重建（HPA 配置 minReplicas=3，但 PDB 阻止驱逐）
-14:05  **Runbook 缺口**：Runbook 只写了「kubectl delete pod」，未写 PDB 卡住怎么办
-14:08  C 手动 `kubectl scale --replicas=4`，恢复
+14:03  发现 drain 卡住：Deployment 只有 3 副本，PDB minAvailable=3 阻止驱逐；新 Pod 又因节点资源不足 Pending
+14:05  **Runbook 缺口**：只写了「kubectl delete pod」，未写「PDB 阻止驱逐 / 新 Pod 调度不上去」怎么办
+14:08  C 扩容节点池并 `kubectl scale --replicas=4`；新 Pod Ready 后 drain 完成，恢复
 14:12  注入：Redis 主节点 kill，触发哨兵切换
 14:12  切换耗时 8s，期间 2,140 次请求报错（应用未做本地缓存兜底）
 14:15  **发现**：应用的重试没有退避，切换期间 QPS 放大 1.8 倍
@@ -471,7 +476,7 @@ GROUP BY mon, severity ORDER BY mon DESC, severity;
 ## 结论与改进项
 | # | 问题 | 改进 | owner | 截止 |
 | --- | --- | --- | --- | --- |
-| 1 | Runbook 未覆盖 PDB 阻止驱逐 | 补章节 + 演练验证 | A | 09-25 |
+| 1 | Runbook 未覆盖 PDB 阻止驱逐 / 新 Pod 调度失败 | 补章节 + 演练验证 | A | 09-25 |
 | 2 | 应用无本地缓存兜底 | 加 Caffeine 一级缓存（TTL 5s） | 订单组 | 10-15 |
 | 3 | 重试无退避 | 加指数退避 + 抖动 | 订单组 | 10-10 |
 | 4 | 演练未计时 | 下次用秒表记录每个阶段 | SRE C | 下次演练 |

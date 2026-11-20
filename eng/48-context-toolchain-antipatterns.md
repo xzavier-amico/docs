@@ -76,7 +76,7 @@
 
 ### ② repo map（全局地图）
 
-用 1~2k token 给模型一张「有什么、在哪」的地图。生成方式：
+用 1~2k token（精选文件与关键入口）到 10~15k token（全量签名，约 60KB 上限）给模型一张「有什么、在哪」的地图；按项目规模选粒度。生成方式：
 
 ```bash
 # Go：用 ctags 或 gopls 生成符号表
@@ -103,7 +103,7 @@ ctags -R --fields=+n --extras=+q -f - ./internal | head -200
 
 ```bash
 # Go：检查是否有反向依赖（api 不应被 internal 引用）
-go list -deps ./internal/... | grep '/api/' && echo "❌ 反向依赖" && exit 1
+go list -deps ./internal/... | grep -E '/api($|/)' && echo "❌ 反向依赖" && exit 1
 # Java：ArchUnit 测试
 ```
 
@@ -351,7 +351,10 @@ func render(fset *token.FileSet, node any) string {
 	var b bytes.Buffer
 	_ = printer.Fprint(&b, fset, node)
 	s := strings.TrimSpace(b.String())
-	if i := strings.LastIndexByte(s, '}'); i >= 0 { s = s[:i] } // 类型体只留开头
+	switch node.(type) {
+	case *ast.StructType, *ast.InterfaceType:
+		if i := strings.IndexByte(s, '{'); i >= 0 { s = strings.TrimSpace(s[:i]) + " { ... }" } // 类型体只留签名
+	}
 	return s
 }
 ```
@@ -409,9 +412,9 @@ wc -c .ai/repo-map.md          # 目标：< 60KB（约 15k token）
 set -euo pipefail
 
 echo "== 1. 依赖方向：internal 不得引用 api =="
-if go list -deps ./internal/... 2>/dev/null | grep -q '/api/'; then
+if go list -deps ./internal/... 2>/dev/null | grep -Eq '/api($|/)'; then
   echo "❌ internal 反向依赖 api，违反分层"
-  go list -deps ./internal/... | grep '/api/' | head
+  go list -deps ./internal/... | grep -E '/api($|/)' | head
   exit 1
 fi
 
@@ -472,6 +475,8 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -479,19 +484,21 @@ func main() {
 	// 1) 收集代码中所有对外错误码（约定：Err 前缀且全大写常量）
 	codes := map[string]bool{}
 	fset := token.NewFileSet()
-	_ = filepathWalk(".", func(path string) {
+	_ = filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") { return nil }
 		f, err := parser.ParseFile(fset, path, nil, 0)
-		if err != nil { return }
+		if err != nil { return nil }
 		ast.Inspect(f, func(n ast.Node) bool {
 			if vs, ok := n.(*ast.ValueSpec); ok {
 				for _, id := range vs.Names {
-					if strings.HasPrefix(id.Name, "Err") && id.Name == strings.ToUpper(id.Name[3:]) {
+					if len(id.Name) > 3 && strings.HasPrefix(id.Name, "Err") && id.Name[3:] == strings.ToUpper(id.Name[3:]) {
 						codes[id.Name] = true
 					}
 				}
 			}
 			return true
 		})
+		return nil
 	})
 
 	// 2) 读文案表（YAML/JSON 皆可，这里用逐行 "CODE=文案"）
@@ -508,6 +515,13 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Println("✅ 错误码文案齐全")
+}
+
+func keys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m { out = append(out, k) }
+	sort.Strings(out)
+	return out
 }
 ```
 
@@ -569,7 +583,7 @@ rg -n 'func\s+\w*(Yuan|Cents|Amount|Money)\w*\(' --type go internal/ | \
 
 ---
 
-## 48.11 规则文件的演进史（一张真实的 v1→v4）
+## 48.11 规则文件的演进史（一张典型的 v1→v4）
 
 规则文件不是一次写完的，它是「每次踩坑后加一条」的产物。某团队 12 个月的演进：
 
@@ -594,7 +608,7 @@ rg -n 'func\s+\w*(Yuan|Cents|Amount|Money)\w*\(' --type go internal/ | \
 | 关键词 | 必须记住的结论 |
 | --- | --- |
 | 规则文件 | 最高性价比；≤150 行；写「禁用项」比写「推荐项」有效 |
-| repo map | 1~2k token 换全局视野；只放签名不放实现 |
+| repo map | 精选 1~2k / 全量 10~15k token 换全局视野；只放签名不放实现 |
 | 先搜再写 | 一次 grep 200ms，省掉一次重复实现 |
 | 依赖图 | 防反向依赖；ArchUnit / go list |
 | 子任务 | 按模块隔离上下文，只共享契约 |
