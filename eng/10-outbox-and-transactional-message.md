@@ -56,7 +56,7 @@
 
 | 方案 | 原子性靠什么 | 消息何时可见 | 典型失败 | 适用 |
 | --- | --- | --- | --- | --- |
-| 事务提交后直接 `send()` | 没有原子性 | 提交后 | 发送失败 → 丢；发送成功、提交失败 → 幽灵 | 允许丢的非关键通知 |
+| 事务内/提交后直接 `send()` | 没有原子性 | 提交前后不一致 | 提交前发：发送成功、提交失败→幽灵；提交后发：发送失败→丢 | 允许丢的非关键通知 |
 | RocketMQ 事务消息 | 半消息 + 本地事务 + 回查 | 本地事务提交后 | 回查失败、半消息堆积 | 已用 RocketMQ、单 MQ |
 | Outbox + relay | 业务库本地事务 | relay 投递后 | relay 挂、重复、积压 | 任意 DB、任意 MQ、跨语言 |
 
@@ -110,7 +110,7 @@
 ```sql
 CREATE TABLE outbox_event (
   id                BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  event_id          CHAR(36)        NOT NULL COMMENT '全局唯一，消费者幂等键',
+  event_id          VARCHAR(128)    NOT NULL COMMENT '全局唯一，消费者幂等键（可含业务后缀）',
   aggregate_type    VARCHAR(64)     NOT NULL COMMENT '聚合类型，如 order/payment/run',
   aggregate_id      VARCHAR(64)     NOT NULL COMMENT '聚合根 ID，分区键',
   aggregate_version BIGINT          NOT NULL DEFAULT 0 COMMENT '同一聚合内单调递增',
@@ -197,7 +197,8 @@ SELECT *
   FROM outbox_event
  WHERE status IN ('NEW','FAILED')
    AND next_retry_at <= NOW(3)
- ORDER BY id
+   AND retry_count < 10
+ ORDER BY next_retry_at, id
  LIMIT 100
  FOR UPDATE SKIP LOCKED;
 
@@ -207,12 +208,16 @@ UPDATE outbox_event
  WHERE id = ?;
 
 -- 发送失败：指数退避，最多 10 次后进人工队列
+-- MySQL 的 SET 从左到右求值：next_retry_at 必须先算，否则会用自增后的 retry_count
 UPDATE outbox_event
    SET status='FAILED',
-       retry_count = retry_count + 1,
        next_retry_at = DATE_ADD(NOW(3), INTERVAL LEAST(POW(2, retry_count) * 5, 300) SECOND),
+       retry_count = retry_count + 1,
        last_error = LEFT(?, 512)
- WHERE id = ?;
+ WHERE id = ? AND retry_count < 10;
+
+-- retry_count >= 10 的行不再被 relay 选中，由人工队列按
+-- status='FAILED' AND retry_count >= 10 捞取处理。
 ```
 
 **关键权衡**：上面的写法在「锁行 → 发 MQ → 更新」期间持有数据库行锁和事务。MQ 慢时，锁时间 = MQ 延迟。更稳的做法是「**认领**」：先用短事务把行改成 `SENDING` 并写 `worker_id`，再在事务外发送，最后标记 `SENT`；崩溃后由巡检把超时的 `SENDING` 改回 `NEW`。多一张状态，少一次长事务。
@@ -343,7 +348,7 @@ rocketMQTemplate.sendMessageInTransaction(
 ```sql
 -- 落点一：事件去重表（通用）
 CREATE TABLE consumed_event (
-  event_id     CHAR(36)    NOT NULL,
+  event_id     VARCHAR(128) NOT NULL,
   consumer     VARCHAR(64) NOT NULL COMMENT '消费组/处理器名',
   consumed_at  DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   PRIMARY KEY (event_id, consumer)
@@ -364,7 +369,7 @@ UPDATE orders
 
 ### 10.4.8 清理与归档：不清理的 Outbox 一定会炸
 
-**容量账**：5,000 事件/秒 × 平均 400 字节 × 86,400 秒 ≈ **172 GB/天**（含索引约 1.5 倍）。保留 7 天就是 1.2 TB；不归档，三个月后这张表会拖垮整个库。
+**容量账**：5,000 事件/秒 × 平均 400 字节 × 86,400 秒 ≈ **172 GB/天**；含索引约 1.5 倍 ≈ **258 GB/天**。保留 7 天就是 **约 1.8 TB**；不归档，三个月后这张表会拖垮整个库。
 
 | 策略 | 做法 | 注意 |
 | --- | --- | --- |

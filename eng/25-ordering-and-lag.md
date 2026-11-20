@@ -8,7 +8,7 @@
 
 ## 25.1 引子：一个 `@Async` 让 1,860 笔已取消订单重新发货
 
-**事故一（2025-08，某零售订单中心）**：`order.events` 24 分区，key 是 `order_id`，Spring Kafka `concurrency=6`。这个配置本身是**保序**的：每个分区固定一个消费线程。
+**事故一（2025-08，某零售订单中心）**：`order.events` 24 分区，key 是 `order_id`，Spring Kafka `concurrency=6`。这个配置本身是**保序**的：每个分区在任一时刻只由一个消费线程处理（一个线程可以轮转多个分区）。
 
 问题在 listener 内部：半年前有人为了「加快状态变更」，加了一行：
 
@@ -23,7 +23,7 @@ public void applyStatus(OrderEvent e) { ... }   // 火忘式调用，listener �
 - 实际发货 **1,240 件**，逆向物流与折价损失 **74 万元**；
 - 客诉 380 单，修复用了 6 小时（逐单比对支付流水与取消时间）。
 
-**事故二（同月大促，堆积）**：同一个 Topic，峰值生产 **18 万 msg/s**，24 个分区，单分区消费能力约 **800 msg/s**，总消费能力 **1.92 万/s**。20:00 开始堆积以 **16 万/s** 增长，30 分钟堆了 **2,880 万条**。值班同学把消费者从 24 扩到 48 实例，**lag 一点没降**——分区只有 24 个，多出的实例分不到分区，全程空转。直到 00:12 才消化完，端到端延迟 **4 小时 12 分**。
+**事故二（同月大促，堆积）**：同一个 Topic，峰值生产 **18 万 msg/s**，24 个分区，单分区消费能力约 **800 msg/s**，总消费能力 **1.92 万/s**。20:00 开始堆积以 **16 万/s** 增长，30 分钟堆了 **约 2.9 亿条**。值班同学把消费者从 24 扩到 48 实例，**lag 一点没降**——分区只有 24 个，多出的实例分不到分区，全程空转。直到 00:40 才消化完，端到端延迟 **4 小时 40 分**。
 
 > 🩸 **两个事故的共同点**：第一个把「读取顺序」当成了「执行顺序」，第二个把「消费者数量」当成了「消费能力」。**顺序由分区和线程共同决定，吞吐由分区数封顶**——这两句话值 74 万。
 
@@ -46,7 +46,7 @@ public void applyStatus(OrderEvent e) { ... }   // 火忘式调用，listener �
 最大吞吐   = 分区数 × 单分区处理能力
 ```
 
-所以要保序的「活跃 key 数」决定了分区数下限：5 万个活跃订单、24 个分区，平均每分区要串行处理 2,000 个订单的事件。**分区不是越多越好**（rebalance 慢、句柄多、延迟高），但少于「峰值吞吐 ÷ 单分区能力」就一定堆积。
+所以要保序的「活跃 key 数」决定了**单个分区要串行处理多少个 key**：5 万个活跃订单、24 个分区，平均每分区要串行处理约 2,000 个订单的事件。分区数下限由「峰值吞吐 ÷ 单分区能力」决定；**分区不是越多越好**（rebalance 慢、句柄多、延迟高），但少于「峰值吞吐 ÷ 单分区能力」就一定堆积。
 
 ---
 
@@ -144,26 +144,27 @@ go tool pprof -top http://10.0.3.17:6060/debug/pprof/goroutine?debug=1
 
 ### 第四步：rebalance 期间发生了什么
 
-Kafka 的 rebalance 不是「瞬间切换」，它有一个所有消费者**停止拉取**的窗口。eager 协议下，这个窗口等于「全部撤销 + 重新加入 + 重新分配」：
+Kafka 的 rebalance 不是「瞬间切换」。eager 协议下，所有消费者先停止拉取、撤销全部分区，再重新加入；cooperative 只撤销需要迁移的分区，其余继续消费：
 
 ```
 t0    C3 加入（或 C2 心跳超时 / 发布重启 / 分区数变化）
       │
 t0    coordinator 进入 PreparingRebalance，向所有成员发 JoinGroup 响应
       │
-t0~t1 所有消费者停止 fetch（lag 开始上涨）
-      │  eager：每个成员先 revoke 全部分区，再 JoinGroup
-      │  cooperative：只 revoke 需要迁走的分区，其余继续消费
+t0~t1 eager：所有消费者停止 fetch（lag 开始上涨），每个成员先 revoke 全部分区
+      │  cooperative：只 revoke 需要迁走的分区，其余继续消费（顺序见下方注）
+      │  ← eager 的 onPartitionsRevoked 在这里执行：提交位点、清理状态
       │
 t1    leader 计算分配方案（Range / RoundRobin / Sticky / CooperativeSticky）
       │
-t2    SyncGroup 下发方案，成员拿到新分区
-      │
-t2~t3 被撤销分区的消费者执行 onPartitionsRevoked：提交位点、清理状态
-      │   ← 这里是重复的高发点：提交的是「最后一条已完成」，不是「最后一条已读取」
+t2    SyncGroup 下发方案，成员拿到新分区；执行 onPartitionsAssigned
       │
 t3    恢复 fetch；新成员从提交位点继续
 ```
+
+> ⚠️ 顺序别记反：`onPartitionsRevoked` 在 **JoinGroup/SyncGroup 之前**执行，不是拿到新方案之后。提交位点要放在这里（或更早的连续水位里），否则新实例会从旧位点重放。
+>
+> cooperative 的完整流程是两轮：先 SyncGroup 算出要迁移的分区，成员 revoke 后再 JoinGroup 完成交接；上面的简化图只强调 eager 的 revoke 时机。
 
 三个关键事实：
 
@@ -182,7 +183,7 @@ spring:
       max-poll-records: 100
       properties:
         partition.assignment.strategy: org.apache.kafka.clients.consumer.CooperativeStickyAssignor
-        group.instance.id: ${HOSTNAME}      # 静态成员：重启不触发 rebalance（同一 session 内）
+        group.instance.id: ${STABLE_INSTANCE_ID}  # 必须稳定（StatefulSet 序号/外部分配）；Deployment 的 HOSTNAME 每次重建都变
         session.timeout.ms: 45000           # 默认 45s；太小会误踢，太大故障发现慢
         heartbeat.interval.ms: 3000         # 通常是 session 的 1/3 以下
         max.poll.interval.ms: 300000        # 必须 > 单批最坏处理时间 × 2
@@ -194,7 +195,7 @@ spring:
       missing-topics-fatal: false
 ```
 
-> ⚠️ `group.instance.id` 只能在同一台机器重启时复用；如果扩容换了 hostname，它就是一个新成员，照样触发 rebalance。静态成员解决的是「滚动重启」，不是「扩容」。
+> ⚠️ `group.instance.id` 只在 **ID 不变** 时有效：同一台机器、或 StatefulSet 的固定序号重启，可以复用；K8s Deployment 的 Pod 名每次重建都变，拿 `${HOSTNAME}` 当 `group.instance.id` 等于没有静态成员。静态成员解决的是「滚动重启」，不是「扩容」。
 
 ### 第五步：分区内串行、分区间并行的代码模板
 
@@ -217,19 +218,22 @@ public void onMessage(ConsumerRecord<String, String> rec, Acknowledgment ack) {
 private final ExecutorService[] lanes = IntStream.range(0, 64)
         .mapToObj(i -> Executors.newSingleThreadExecutor(r -> new Thread(r, "lane-" + i)))
         .toArray(ExecutorService[]::new);
-private final ConcurrentHashMap<TopicPartition, Long> watermark = new ConcurrentHashMap<>();
+private final ConcurrentHashMap<TopicPartition, Long> nextOffset = new ConcurrentHashMap<>();
+private final ConcurrentHashMap<TopicPartition, ConcurrentSkipListSet<Long>> completed = new ConcurrentHashMap<>();
 
-public void dispatch(ConsumerRecord<String, String> rec, Acknowledgment ack) {
-    int lane = Math.floorMod(rec.key().hashCode(), lanes.length);
+public void dispatch(ConsumerRecord<String, String> rec) {
+    String key = rec.key() == null ? "p" + rec.partition() : rec.key();
+    int lane = Math.floorMod(key.hashCode(), lanes.length);
+    TopicPartition tp = new TopicPartition(rec.topic(), rec.partition());
+    nextOffset.putIfAbsent(tp, rec.offset());   // dispatch 按 offset 顺序调用，先记下分区起点
     lanes[lane].submit(() -> {
         try {
             orderStateMachine.apply(json.read(rec.value(), OrderEvent.class));
-            long done = rec.offset();
-            long prev = watermark.merge(new TopicPartition(rec.topic(), rec.partition()),
-                                        done, Math::max);
-            if (done == prev) {          // 只有推进到当前最大已完成位点才提交
-                ack.acknowledge();       // 简化版：生产上要按「连续水位」而不是 max
-            }
+            completed.computeIfAbsent(tp, k -> new ConcurrentSkipListSet<>()).add(rec.offset());
+            long next = nextOffset.get(tp);
+            while (completed.get(tp).remove(next)) next++;   // 连续完成水位
+            nextOffset.put(tp, next);
+            commitContiguous(tp, next);   // 用 Consumer.commitSync(tp, next)；不能用单条 Acknowledgment
         } catch (Exception ex) {
             log.error("lane failed key={} offset={}", rec.key(), rec.offset(), ex);
             // 不提交，交给容器重投；lane 内后续消息会阻塞在该 key 上
@@ -238,7 +242,7 @@ public void dispatch(ConsumerRecord<String, String> rec, Acknowledgment ack) {
 }
 ```
 
-> 💡 简化版：生产上位点必须按「连续完成水位」提交。嫌复杂就**改上游 key**，别造调度器。
+> 💡 位点必须按「连续完成水位」提交，不能用单条 `Acknowledgment`（它提交的是当前 record 的 offset，不是水位，仍可能跳过前面的 in-flight 消息）。分区被撤销/重新分配时，还要在 `onPartitionsRevoked`/`onPartitionsAssigned` 里清掉 `nextOffset`/`completed` 中对应的 `TopicPartition`，否则 seek 回头会带着旧水位跳过消息。嫌复杂就**改上游 key**，别造调度器。
 
 Go（Sarama，`ConsumeClaim` 每个分区一个 goroutine，天然分区内串行）：
 
@@ -251,7 +255,7 @@ func (h *Handler) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.Co
 			return fmt.Errorf("decode offset=%d: %w", msg.Offset, err)
 		}
 		if err := h.sm.Apply(sess.Context(), e); err != nil {
-			return err // 返回错误 → 该分区暂停，触发重平衡/重试；不要吞
+			return err // 返回错误会结束整个 session（所有分区一起 rebalance），不是只暂停该分区；毒消息应先转 DLQ
 		}
 		sess.MarkMessage(msg, "") // 标记位点，由 Sarama 批量提交
 	}
@@ -278,7 +282,7 @@ func (h *Handler) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.Co
 
 **必须重算的三样**：
 
-1. **「一条消息处理多久」决定了消费模型**。传统消息 50ms，24 分区 × 800/s 就够；Agent 一条 Step 可能触发 30 秒的模型调用，单分区吞吐只有 0.03/s。**不能把「收消息 → 调模型 → 写结果」放在消费线程里**，应「消费只写 Run 表 + 入队，Worker 异步执行并回写 Step 事件」。
+1. **「一条消息处理多久」决定了消费模型**。传统消息单条约 5ms、批量后单分区可到 800/s，24 分区就够；Agent 一条 Step 可能触发 30 秒的模型调用，单分区吞吐只有 0.03/s。**不能把「收消息 → 调模型 → 写结果」放在消费线程里**，应「消费只写 Run 表 + 入队，Worker 异步执行并回写 Step 事件」。
 2. **顺序的边界从「订单」变成「会话」**。同一 `session_id` 的多个 Run 可能并发，业务要决定「串行还是打断」；`run_id` 内的 Step 必须按 `seq`。
 3. **堆积的含义变了**。传统 lag 是条数，Agent 的 lag 是「**排队 Run 数 × 单 Run token 成本**」；10 万个 Run 排队可能是 300 万元在途预算。
 
@@ -319,12 +323,10 @@ mysql -e "SELECT COUNT(*), MIN(seq), MAX(seq), COUNT(DISTINCT seq)
 **② 堆积演练**：停消费者 10 分钟，确认 lag 告警 2 分钟内触发、扩容后 5 分钟开始下降：
 
 ```bash
-# 暂停消费组（或直接 kill 实例）
-kafka-consumer-groups.sh --bootstrap-server broker1:9092 \
-  --group order-service --topic order.events --pause
-# 恢复
-kafka-consumer-groups.sh --bootstrap-server broker1:9092 \
-  --group order-service --topic order.events --resume
+# kafka-consumer-groups.sh 没有 --pause/--resume；直接停消费者实例
+kubectl scale deploy/order-service --replicas=0 -n trade     # 暂停
+kubectl scale deploy/order-service --replicas=3 -n trade     # 恢复
+# 也可以用客户端 KafkaConsumer.pause() / kill -STOP，效果相同
 ```
 
 **③ rebalance 注入**：滚动重启消费者，观察 `rebalance` 次数、重复量、恢复时间：

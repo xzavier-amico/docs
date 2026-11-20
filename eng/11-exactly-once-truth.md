@@ -23,7 +23,7 @@
 - 4,200 个用户被重复加积分，人均 200 分，可抵扣金额 **8.4 万元**。
 - 更麻烦的是：部分用户已经用重复积分下了单，回收积分要把订单一起处理，客诉 860 起。
 
-> 🩸 两个事故合起来就是 Exactly-once 的全部真相：**先提交位点会丢，先处理会重；只有「先处理 + 幂等 + 后提交」才能既不丢也不重。** MQ 本身给不了这个保证，它只能给你「至少一次」或「至多一次」。
+> 🩸 两个事故合起来就是 Exactly-once 的全部真相：**先提交位点会丢，先处理会重；只有「先处理 + 幂等 + 后提交」才能既不丢也不重。** 对**跨系统的端到端**来说，MQ 本身给不了这个保证，它只能给你「至少一次」或「至多一次」；Kafka 事务能在 Kafka 内部做到 EOS，但覆盖不到你的 DB/Redis/第三方。
 
 ---
 
@@ -35,7 +35,7 @@
 - **至少一次（at-least-once）**：消息至少被处理一次，可能重。实现方式是「先处理，再提交位点/ack」。
 - **恰好一次（exactly-once）**：每条消息的业务效果恰好一次。它不是 MQ 的单点能力，而是**端到端**的组合：生产端不丢 + 消费端幂等（+ 必要时事务）。
 
-**为什么 MQ 只能二选一？** 因为「处理完成」和「位点提交/ack」是两个独立的写操作，它们之间没有原子性。看两种 ack 丢失：
+**为什么跨系统的端到端只能二选一？** 因为当「处理完成」写的是 DB/Redis 等外部系统时，它与「位点提交/ack」是两个独立的写操作，彼此没有原子性（Kafka 事务只能把 Kafka 输出与位点绑在一起，管不到外部系统）。看两种 ack 丢失：
 
 ```
 情形 A：消费端处理成功，ack/位点提交丢失
@@ -249,7 +249,7 @@ spring:
       concurrency: 4
 ```
 
-> ⚠️ `enable-auto-commit=true` 的本质是「按时间提交，不按处理结果提交」。它不知道你的业务有没有成功，所以它一定会丢。**生产环境把它关掉，是消费可靠性的第一条纪律。**
+> ⚠️ `enable-auto-commit=true` 的本质是「按时间提交，不按处理结果提交」。它不知道你的业务有没有成功，所以**在异步处理或进程崩溃时就会丢**。**生产环境把它关掉，是消费可靠性的第一条纪律。**
 
 ---
 
@@ -342,11 +342,13 @@ func (h *StepHandler) Handle(ctx context.Context, evt StepEvent) error {
 -- 消费侧：消息数 vs 业务生效数（按小时）
 SELECT DATE_FORMAT(created_at, '%Y-%m-%d %H:00') AS hour,
        COUNT(*) AS consumed,
-       COUNT(DISTINCT biz_key) AS distinct_biz
+       COUNT(DISTINCT COALESCE(biz_key, event_id)) AS distinct_biz
   FROM consume_idempotency
  WHERE consumer_group='points-consumer'
  GROUP BY hour
 HAVING consumed <> distinct_biz;
+-- 注意：这里假设「一个 biz_key 只产生一次业务效果」；
+-- 若一个业务键合法对应多条事件，应按 (biz_key, event_type) 分组再比。
 
 -- 业务侧：积分流水与订单应付积分是否一致
 SELECT o.order_no, o.points_expected, COALESCE(SUM(f.points),0) AS points_actual
@@ -402,7 +404,7 @@ HAVING points_actual <> o.points_expected;
 
 ## 11.10 自检题
 
-1. **Kafka 开了 `enable.auto.commit=true`，业务处理在异步线程池里，为什么一定会丢消息？**
+1. **Kafka 开了 `enable.auto.commit=true`，业务处理在异步线程池里，为什么会丢消息？**
    <details><summary>答案要点</summary>
    自动提交按时间推进位点，不知道异步线程是否处理成功。Pod 被杀时位点已提交、线程池任务丢失，重启后从新位点开始，未处理的消息永远不会再投。修法：关自动提交、同步处理、业务提交后再提交位点、幂等兜底。
    </details>

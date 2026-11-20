@@ -23,7 +23,7 @@
 | 09-30 23:59 | 累计支付成功但无分录 | **3,700 笔 / 186 万元** |
 | 10-01 00:05 | 日终对账因节假日顺延（无人值守） | 0 次核对 |
 | 10-09 02:10 | 日终对账启动，比对 8.2 亿行流水 | — |
-| 10-09 04:47 | 差异表写入 3,700 条 `SHORT`，差异率 0.00045% | 4,900 条/分钟 |
+| 10-09 04:47 | 差异表写入 3,700 条 `SHORT`，差异率 0.00045% | 扫描约 8.7 万条/秒 |
 | 10-09 09:30 | 财务确认 42 笔跨月，报表已报出，需追溯调整 | 跨月 42 笔 |
 
 **事故二：Agent 平台 token 账单多算 2.3%（2025-11-02）**
@@ -37,7 +37,7 @@
 | 时间 | 事件 | 数据 |
 | --- | --- | --- |
 | 11-02 10:00 | 月结开始，拉取 10 月内部用量与供应商账单 | 312 租户 |
-| 10:12 | 内部 4.28B token，供应商账单 4.38B | 差 **2.3%** |
+| 10:12 | 内部 4.38B token，供应商账单 4.28B | 内部多计 **2.3%** |
 | 10:31 | 抽样 100 个 Run，发现同一 `step_id` 两条 usage | 重试率 3.1% |
 | 11:05 | 定位：`usage` 表无 `uk(run_id, step_id)`，重试即重复计费 | 47 万元 |
 | 14:30 | 退费方案审批通过，按租户逐笔冲正 | 312 笔冲正 |
@@ -143,10 +143,10 @@
 渠道文件通常是 CSV/定长文本，必须带**头尾和校验**，否则你无法判断「文件是不是完整」。
 
 ```
-H,20250930,CHANNEL_A,CNY,000003,000000000000000123.45,9f2c...
+H,20250930,CHANNEL_A,CNY,000002,000000000000000123.45,9f2c...
 D,PAY202509300001,ORDER001,100.00,SUCCESS,2025-09-30 10:00:01
 D,PAY202509300002,ORDER002,23.45,SUCCESS,2025-09-30 10:00:03
-T,000003,000000000000000123.45
+T,000002,000000000000000123.45
 ```
 
 | 行 | 含义 | 校验 |
@@ -328,7 +328,7 @@ SELECT merchant_id,
 下面的 `LEFT JOIN ... IS NULL` 依赖 `join_use_nulls=1`；在执行查询的同一会话设置，或对所有执行账户强制使用下文的 `recon` profile。
 
 ```sql
--- 分片键：物化列 shard = cityHash64(biz_no) % 64；每个分片独立跑，互不依赖
+-- 分片键：物化列 shard = cityHash64(biz_no) % 128；每个分片独立跑，互不依赖
 SET join_use_nulls = 1;
 
 -- ① 短款（漏记）：业务有、渠道无
@@ -451,7 +451,7 @@ func RunRecon(ctx context.Context, jobID string, shards int) error {
 }
 ```
 
-**分片数怎么定**：按「单分片 500 万~1,000 万行、单分片耗时 1~3 分钟」反推。10 亿行 → 100~200 个分片；并发 8~16，避免把 ClickHouse 的 CPU/内存打满。分片键必须稳定（`biz_no` 哈希），否则断点续跑会对不上。
+**分片数怎么定**：按「单分片 500 万~1,000 万行、单分片耗时 1~3 分钟」反推。10 亿行 → **128 个分片**（每片约 780 万行）；并发 8~16，避免把 ClickHouse 的 CPU/内存打满。分片键必须稳定（`biz_no` 哈希），否则断点续跑会对不上。
 
 ### 14.4.5 差异处理：自动冲正 / 自动补记 / 人工工单
 
@@ -465,8 +465,9 @@ func RunRecon(ctx context.Context, jobID string, shards int) error {
 
 ```sql
 -- 自动冲正：不删除原分录，插入反向分录；diff 标记 AUTO_FIXED
+-- entry_no 由 diffId 派生（唯一），不能写常量，否则第二笔冲正会撞唯一键
 INSERT INTO ledger_entry(biz_no, entry_no, account_id, direction, amount, remark)
-SELECT biz_no, 99, account_id, IF(direction='DEBIT','CREDIT','DEBIT'), amount, 'AUTO_REVERSAL'
+SELECT biz_no, ?, account_id, IF(direction='DEBIT','CREDIT','DEBIT'), amount, 'AUTO_REVERSAL'
   FROM ledger_entry
  WHERE biz_no = ? AND entry_no = 1;
 
@@ -540,7 +541,7 @@ MergeTree 的物理结构（单分区 dt=2025-09-30）
 CREATE TABLE recon.biz_flow (
   dt          Date,
   biz_no      String,
-  shard       UInt8 MATERIALIZED toUInt8(cityHash64(biz_no) % 64),
+  shard       UInt8 MATERIALIZED toUInt8(cityHash64(biz_no) % 128),
   channel     LowCardinality(String),
   merchant_id UInt64,
   amount      Decimal(18,2),
@@ -554,7 +555,7 @@ SETTINGS index_granularity = 8192;
 CREATE TABLE recon.channel_flow (
   dt          Date,
   biz_no      String,
-  shard       UInt8 MATERIALIZED toUInt8(cityHash64(biz_no) % 64),
+  shard       UInt8 MATERIALIZED toUInt8(cityHash64(biz_no) % 128),
   channel     LowCardinality(String),
   channel_txn String,
   amount      Decimal(18,2),
@@ -568,11 +569,11 @@ SETTINGS index_granularity = 8192;
 -- 致命检查：物化 shard 必须与分片函数一致；改成 %128 只改一侧 = 全量假差异
 SELECT 'biz' AS tbl, count() AS bad_bucket
   FROM recon.biz_flow
- WHERE dt = '2025-09-30' AND shard != toUInt8(cityHash64(biz_no) % 64)
+ WHERE dt = '2025-09-30' AND shard != toUInt8(cityHash64(biz_no) % 128)
 UNION ALL
 SELECT 'channel', count()
   FROM recon.channel_flow
- WHERE dt = '2025-09-30' AND shard != toUInt8(cityHash64(biz_no) % 64);
+ WHERE dt = '2025-09-30' AND shard != toUInt8(cityHash64(biz_no) % 128);
 -- 期望两行都是 0；非 0 说明物化列/分片函数不一致，差异率会飙到几十个百分点
 ```
 
@@ -633,6 +634,11 @@ public class DiffHandler {
         if (dryRun) return HandleResult.wouldFix(diffId, d.getDiffType());
         tx.executeWithoutResult(st -> {
             String entryNo = "REV" + d.getReconDate().toString().replace("-", "") + "-" + diffId;
+            // 0 行可能有两种原因：已冲过（幂等）或源分录不存在（数据问题）。
+            // 先确认源分录存在，避免把「没冲成」上报成 fixed。
+            if (!ledgerMapper.existsSource(d.getBizNo(), 1)) {
+                throw new IllegalStateException("source entry not found: " + d.getBizNo());
+            }
             int inserted = ledgerMapper.insertReversal(entryNo, d.getBizNo(), d.getAmount());
             if (inserted == 0) {                        // 已经冲过：幂等返回，不报错
                 return;
@@ -783,7 +789,7 @@ SELECT MIN(created_at) AS oldest_open,
 **③ 亿级压测**：造 10 亿行业务流水 + 10 亿行渠道流水，128 分片、并发 8，目标：
 
 - 汇总校验 < 3 分钟；
-- 明细比对 < 30 分钟；
+- 明细比对 < 50 分钟（128÷8 = 16 轮 × 每轮 1~3 分钟）；
 - ClickHouse 内存峰值 < 单节点 60%；
 - 差异写入 < 100 万条/小时。
 
@@ -842,7 +848,7 @@ SELECT MIN(created_at) AS oldest_open,
    整文件拒收，标记 `FAILED`，不进入对账；联系渠道补文件/重传，保留原始文件与校验结果。绝不能「先入库再说」，否则会产生大量假差异，且污染后续重跑。
    </details>
 
-3. **Agent 平台按 token 计费，供应商账单比内部多 2.3%，你怎么定位？**
+3. **Agent 平台按 token 计费，内部用量比供应商账单多 2.3%，你怎么定位？**
    <details><summary>答案要点</summary>
    按 `run_id + step_id + model` 对账：先查用量表是否按 `step_id` 唯一（重试重复计费）、再查价格版本/缓存折扣/分页漏拉、最后抽样原始调用日志与供应商 request_id 对齐。对账的是次数/token/单价/成本，不是输出内容。
    </details>

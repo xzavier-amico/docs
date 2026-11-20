@@ -18,9 +18,9 @@ unclean.leader.election.enable=true
 ```
 
 - **10:02** `broker-3` 的 SSD 报 SMART 错误，内核把盘置为只读，Kafka 日志目录写入失败，broker 进程退出。
-- **10:02:40** `pay.success` 的 partition-2 leader 在 `broker-3` 上，Controller 触发选举。ISR 里有 `broker-1`、`broker-5`。
-- **10:02:41** 但 `broker-1` 当时正被一个全量同步任务拖着，ISR 已经缩到只剩 `{broker-3}`（`min.insync.replicas=1` 所以写入一直没报错）；`broker-5` 的 LEO 落后 **3,400 条**。
-- **10:02:44** 因为 ISR 里没有其他成员，加上 `unclean.leader.election.enable=true`，Controller 选了 `broker-5` 当 leader，并把它的 LEO 当作新 HW。
+- **10:02:40** `pay.success` 的 partition-2 leader 在 `broker-3` 上，Controller 触发选举。ISR 里有 `broker-1`、`broker-3`、`broker-5`。
+- **10:02:41** 但 `broker-1` 正被一个全量同步任务拖着，`broker-5` 的 LEO 落后 **3,400 条**，两者先后被移出 ISR；ISR 只剩 `{broker-3}`（`min.insync.replicas=1` 所以写入一直没报错）。
+- **10:02:44** `broker-3` 退出后 ISR 为空，加上 `unclean.leader.election.enable=true`，Controller 选了 `broker-5` 当 leader，并把它的 LEO 当作新 HW。
 - **10:02:45** 那 **3,400 条**「已 ack」的支付成功通知被**截断**（log truncation）。生产端日志里每一条都是 `offset=8,412,297 ... ack received`。
 - **12:40** 客服开始集中收到「我付了钱，订单还是待支付」。此时距事发 **2 小时 38 分**。
 - 影响 **3,400 笔**订单，其中 **1,180 笔**用户重复支付（因为页面提示「支付失败」），退款加赔付 **11.6 万元**，客诉 **740 单**。
@@ -220,7 +220,7 @@ spring:
 ```bash
 # 必须监控的两个量：ISR 收缩、HW 与 LEO 的差
 kafka-topics.sh --bootstrap-server broker1:9092 --describe --topic pay.success \
-  | awk '{print $2, $4, $6, $8}'   # Partition, Leader, Replicas, Isr
+  | awk '{print $4, $6, $8, $10}'   # Partition, Leader, Replicas, Isr
 
 # Isr 数量 < 副本数就是告警；持续 5 分钟 = P1（你在单副本运行）
 kafka-topics.sh --bootstrap-server broker1:9092 --describe --topic pay.success \
@@ -431,7 +431,8 @@ func (h *Handler) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.Co
 		// ❌ 错误：sess.MarkMessage(msg, "") 之后再开 goroutine 处理
 		// Sarama 会在下一次 Commit 时提交这个位点，业务还没跑
 		if err := h.handle(sess.Context(), msg); err != nil {
-			// 不 Mark，返回错误让该分区重新分配；或按错误类型进 DLQ 后 Mark
+			// 不 Mark，返回错误会结束整个 session（所有分区一起 rebalance），不是只重分配该分区；
+			// 永久错误应先转 DLQ，再 Mark 跳过。
 			if errors.Is(err, ErrPermanent) {
 				if derr := h.dlq.Send(msg, err); derr != nil {
 					return derr // DLQ 也失败：千万别 Mark，让消息重投
@@ -656,7 +657,7 @@ HAVING missing_in_biz > 0
 
 ### 第六步：Agent 侧——长任务用检查点，不要重投
 
-传统消息重投的代价是「再跑一次幂等逻辑」，几毫秒。Agent 的一条消息可能对应一个 **45 秒、烧 3 万 token 的 Run**：重投 = 从第 1 步重跑 = **前面 20 万 token 白花 + 工具副作用重放**。所以 Agent 的可靠性设计与传统有本质差异：
+传统消息重投的代价是「再跑一次幂等逻辑」，几毫秒。Agent 的一条消息可能对应一个 **45 秒、单步烧 2~3 万 token 的 Step**；一个长 Run 跑到第 8 步已累计约 20 万 token，重投 = 从第 1 步重跑 = **前面 20 万 token 白花 + 工具副作用重放**。所以 Agent 的可靠性设计与传统有本质差异：
 
 | 场景 | 传统做法 | Agent 做法 | 为什么 |
 | --- | --- | --- | --- |

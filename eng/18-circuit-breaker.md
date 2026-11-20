@@ -95,7 +95,7 @@ minimum_number_of_calls: 20
 | CLOSED | 慢调用率 ≥ 30% 且慢调用数 ≥ 10 | 同上 | OPEN | 记录 P99 与慢调用阈值 |
 | OPEN | 冷却时间到（默认 30s） | 只放 `permittedNumberOfCallsInHalfOpenState` 个探针 | HALF_OPEN | `state=half_open` |
 | HALF_OPEN | 探针成功数 ≥ 阈值（如 5 中 3） | 清空窗口，恢复放行 | CLOSED | `state=closed`，记录恢复耗时 |
-| HALF_OPEN | 任一探针失败，或成功率 < 60% | 重新打开，冷却翻倍（30→60→120s，上限 5min） | OPEN | `state=open`，记录退避时长 |
+| HALF_OPEN | 探针窗口结束（如 5 个）且失败率 ≥ 50%（或成功率 < 60%） | 重新打开，冷却翻倍（30→60→120s，上限 5min） | OPEN | `state=open`，记录退避时长 |
 | 任意 | 人工强制 open/close | 写入审计，忽略自动转换 | 指定状态 | `manual_override=true` |
 
 **探测策略的三种做法**：
@@ -164,7 +164,7 @@ slowCallDurationThreshold = min(上游超时 × 0.6, 下游 P99 × 1.5)
 
 | # | 判据 | 合格线 | 不满足会怎样 |
 | --- | --- | --- | --- |
-| 1 | 误熔断率 | 因熔断被拒的请求中，真正下游故障的占比 ≥ 95% | 健康下游被误杀，容量白丢 |
+| 1 | 误熔断占比 | ≤ 5%（等价于被拒请求中真实故障占比 ≥ 95%） | 健康下游被误杀，容量白丢 |
 | 2 | 恢复探测 | HALF_OPEN 有明确探针数、成功率、退避上限 | 永远不恢复，或恢复即二次打崩 |
 | 3 | 并发安全 | 状态转换用 CAS/原子变量，半开只有一个探测窗口 | 半开风暴，200 个探针同时打 |
 | 4 | 指标完整 | state、calls、failures、slow、not_permitted、fallback 都有 | 出事时不知道熔断器为什么开 |
@@ -460,8 +460,12 @@ sum(rate(resilience4j_circuitbreaker_calls_seconds_count[1m])) by (name)
 # 被熔断拒绝的请求
 sum(rate(resilience4j_circuitbreaker_not_permitted_calls_total[1m])) by (name)
 
-# 慢调用率（如果接了慢调用指标）
-sum(rate(http_client_duration_seconds_bucket{le="2",service="reco"}[1m]))
+# 慢调用率 = 1 - ≤2s 的占比（慢阈值按业务定，这里以 2s 为例）
+1 - (
+  sum(rate(http_client_duration_seconds_bucket{le="2",service="reco"}[1m]))
+  /
+  sum(rate(http_client_duration_seconds_count{service="reco"}[1m]))
+)
 ```
 
 **⑤ 单测**：用假时钟推进 `waitDurationInOpenState`，验证 CLOSED → OPEN → HALF_OPEN → CLOSED 的完整转换；并发 200 个 goroutine 同时调用，验证只有 5 个探针进入 HALF_OPEN。

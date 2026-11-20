@@ -197,18 +197,18 @@ sum(rate(orders_created_total{status="success"}[5m]))
 
 **反例一：平均值掩盖长尾。**
 
-1,000 个请求：990 个 100ms，10 个 10s。
+1,000 个请求：989 个 100ms，11 个 10s。
 
 ```
-平均 = (990 × 0.1 + 10 × 10) / 1,000
-     = (99 + 100) / 1,000
-     = 0.199s = 199ms
+平均 = (989 × 0.1 + 11 × 10) / 1,000
+     = (98.9 + 110) / 1,000
+     = 0.2089s ≈ 209ms
 P50 = 100ms
 P95 = 100ms
 P99 = 10s
 ```
 
-平均 199ms 看起来「可接受」，但 1% 的用户等了 10 秒。如果你的 SLO 是「P99 < 1s」，这个系统已经违约，而平均延迟完全看不出来。
+平均 209ms 看起来「可接受」，但 1.1% 的用户等了 10 秒。如果你的 SLO 是「P99 < 1s」，这个系统已经违约，而平均延迟完全看不出来。
 
 **反例二：跨实例求 P99 是错的。**
 
@@ -244,7 +244,7 @@ P99 = 10s
 实例 A：le=0.1: 9000, le=0.3: 9500, le=1: 9900, le=3: 10000, +Inf: 10000
 实例 B：le=0.1: 90,   le=0.3: 99,   le=1: 100,  le=3: 100,   +Inf: 100
 聚合：  le=0.1: 9090, le=0.3: 9599, le=1: 10000, le=3: 10100, +Inf: 10100
-P99 = 第 9,999 个请求所在桶 → le=1 桶，插值约 0.9s
+P99 = 第 9,999 个请求所在桶 → le=1 桶，插值约 1.0s
 ```
 
 PromQL：
@@ -338,22 +338,25 @@ import java.time.Duration;
 @Component
 public class OrderMetrics {
 
-    private final Timer requestTimer;
+    private final MeterRegistry registry;
 
     public OrderMetrics(MeterRegistry registry) {
-        this.requestTimer = Timer.builder("http_request_duration_seconds")
+        this.registry = registry;
+    }
+
+    public void record(String route, String status, long nanos) {
+        // route 必须是模板（/orders/{id}），不能是原始 URL；status 只取 2xx/4xx/5xx
+        // 生产上可按 route 预注册并缓存 Timer；这里为演示用 builder 动态打标签
+        Timer.builder("http_request_duration_seconds")
                 .description("HTTP request latency")
                 .publishPercentileHistogram()
                 .sla(Duration.ofMillis(100),
                      Duration.ofMillis(300),
                      Duration.ofSeconds(1),
                      Duration.ofSeconds(3))
-                .register(registry);
-    }
-
-    public void record(String route, String status, long nanos) {
-        // route 必须是模板（/orders/{id}），不能是原始 URL；status 只取 2xx/4xx/5xx
-        requestTimer.labels(route, status).record(Duration.ofNanos(nanos));
+                .tags("route", route, "status", status)
+                .register(registry)
+                .record(Duration.ofNanos(nanos));
     }
 }
 ```
@@ -431,50 +434,44 @@ func Handler() http.Handler {
 @Component
 public class AgentMetrics {
 
-    private final Counter tokens;
-    private final Counter toolCalls;
-    private final Counter taskSuccess;
-    private final Timer ttft;
-    private final DistributionSummary runCost;
+    private final MeterRegistry reg;
 
     public AgentMetrics(MeterRegistry reg) {
-        this.tokens = Counter.builder("llm_tokens_total")
-                .description("LLM tokens by provider/model/type")
-                .register(reg);
-        this.toolCalls = Counter.builder("tool_call_total")
-                .description("tool invocations by tool and status")
-                .register(reg);
-        this.taskSuccess = Counter.builder("agent_task_success_total")
-                .description("task-level success judged by rule/llm/human")
-                .register(reg);
-        // TTFT：只对流式请求记录首包耗时；桶卡在 200ms~5s（用户感知区间）
-        this.ttft = Timer.builder("llm_ttft_seconds")
-                .serviceLevelObjectives(
-                        Duration.ofMillis(200), Duration.ofMillis(500),
-                        Duration.ofSeconds(1), Duration.ofSeconds(2), Duration.ofSeconds(5))
-                .register(reg);
-        // 单 Run 成本：桶按 0.01~5 美元，覆盖 99% 的对话型 Run
-        this.runCost = DistributionSummary.builder("agent_run_cost_usd")
-                .serviceLevelObjectives(0.01, 0.05, 0.1, 0.5, 1.0, 5.0)
-                .register(reg);
+        this.reg = reg;
     }
 
     public void onLlmCall(String provider, String model, Usage u, long ttftNanos, boolean stream) {
-        tokens.labels(provider, model, "input").increment(u.input());
-        tokens.labels(provider, model, "output").increment(u.output());
-        tokens.labels(provider, model, "cached").increment(u.cached());
+        reg.counter("llm_tokens_total", "provider", provider, "model", model, "type", "input")
+           .increment(u.input());
+        reg.counter("llm_tokens_total", "provider", provider, "model", model, "type", "output")
+           .increment(u.output());
+        reg.counter("llm_tokens_total", "provider", provider, "model", model, "type", "cached")
+           .increment(u.cached());
         if (stream) {
-            ttft.labels(provider, model, "true").record(Duration.ofNanos(ttftNanos));
+            // 生产上按 (provider, model, stream) 缓存 Timer；这里演示按标签取 Meter
+            Timer.builder("llm_ttft_seconds")
+                 .serviceLevelObjectives(
+                         Duration.ofMillis(200), Duration.ofMillis(500),
+                         Duration.ofSeconds(1), Duration.ofSeconds(2), Duration.ofSeconds(5))
+                 .tags("provider", provider, "model", model, "stream", "true")
+                 .register(reg)
+                 .record(Duration.ofNanos(ttftNanos));
         }
     }
 
     public void onRunEnd(String tenantTier, String model, double costUsd, boolean success, String judge) {
-        runCost.labels(tenantTier, model).record(costUsd);   // tenant_tier，不是 tenant_id
-        if (success) taskSuccess.labels("chat", judge).increment();
+        DistributionSummary.builder("agent_run_cost_usd")
+                .serviceLevelObjectives(0.01, 0.05, 0.1, 0.5, 1.0, 5.0)
+                .tags("tenant_tier", tenantTier, "model", model)   // tenant_tier，不是 tenant_id
+                .register(reg)
+                .record(costUsd);
+        if (success) {
+            reg.counter("agent_task_success_total", "task_type", "chat", "judge", judge).increment();
+        }
     }
 
     public void onToolCall(String tool, String status) {
-        toolCalls.labels(tool, status).increment();
+        reg.counter("tool_call_total", "tool", tool, "status", status).increment();
     }
 }
 ```
@@ -731,7 +728,7 @@ rate(prometheus_target_scrape_pool_sync_total[5m])                   # 目标同
 | 指标 vs 日志 vs Trace | 指标看趋势，日志看单次，Trace 看链路；成本差 10 万倍 |
 | 四黄金信号 | 延迟、流量、错误、饱和度 |
 | RED/USE | RED 看服务（Rate/Errors/Duration），USE 看资源（Util/Sat/Errors） |
-| 平均延迟 | 990 个 100ms + 10 个 10s → 平均 199ms，P99 10s；平均骗人 |
+| 平均延迟 | 989 个 100ms + 11 个 10s → 平均 209ms，P99 10s；平均骗人 |
 | 跨实例 P99 | 不能平均、不能 max；先 `sum by (le)` 再 `histogram_quantile` |
 | Histogram | 桶按 SLO 设计，10~20 个；桶太粗误差 50% |
 | 高基数 | `user_id`/`order_id`/`prompt` 不进标签；series > 10k 要审查 |
@@ -744,9 +741,9 @@ rate(prometheus_target_scrape_pool_sync_total[5m])                   # 目标同
 
 ## 20.10 自检题
 
-1. **1,000 个请求：990 个 100ms，10 个 10s。平均延迟、P99 各是多少？为什么 SLO 不能用平均？**
+1. **1,000 个请求：989 个 100ms，11 个 10s。平均延迟、P99 各是多少？为什么 SLO 不能用平均？**
    <details><summary>答案要点</summary>
-   平均 = (990×0.1 + 10×10)/1,000 = 199ms；P99 = 10s。平均被 99% 的快请求拉低，完全掩盖了 1% 用户的 10 秒等待。SLO 必须用分位数（P99/P95），并且成功/失败请求要分开统计；平均只用于趋势。
+   平均 = (989×0.1 + 11×10)/1,000 ≈ 209ms；P99 = 10s。平均被 98.9% 的快请求拉低，完全掩盖了 1.1% 用户的 10 秒等待。SLO 必须用分位数（P99/P95），并且成功/失败请求要分开统计；平均只用于趋势。
    </details>
 
 2. **实例 A 10,000 请求 P99=900ms，实例 B 100 请求 P99=100ms。全局 P99 是多少？为什么不能 (900+100)/2？**

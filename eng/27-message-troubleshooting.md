@@ -24,9 +24,9 @@
 - **10:04** 收到工单，值班同学打开路径图。
 - **10:05** 用 `order_id` 查生产端日志 → 找到 `sendId`，状态 `SEND_OK`。
 - **10:07** 用 `--partition 5 --offset 8,412,297` 从 broker 取那一条 → **在**。
-- **10:09** `--describe` 看消费组 → partition 5 的 `LAG=0`，但 `CONSUMER-ID` 是 `-`。
-- **10:12** 发现该分区在 09:58 的 rebalance 后没被分配（实例数 3 × `concurrency=6` = 18 个线程，24 个分区，6 个分区无人消费）。
-- **10:16** 定位完成，扩容到 4 实例，10:31 积压清零，补发 640 条。
+- **10:09** `--describe` 看消费组 → partition 5 的 `LAG=41 万`，`CONSUMER-ID=consumer-2-3`。
+- **10:12** 发现 partition 5 与另一个高流量分区都落在 `consumer-2-3` 这一个线程上（3 实例 × `concurrency=6` = 18 个线程 < 24 个分区）；热点分区被同线程的另一个分区拖慢，消息本身没丢。
+- **10:16** 定位完成，扩容到 4 实例（24 线程 = 24 分区），10:31 积压清零，补发 640 条。
 - **12 分钟定位，27 分钟恢复，影响 640 单。**
 
 > 🩸 两起事故的差距不在技术，而在**顺序**：一个先重启再问人，一个先查 ID 再查 broker。**排查路径的价值是把「灵感」换成「流程」——让一个刚值夜班的同学也能在 15 分钟内走完。**
@@ -196,7 +196,7 @@ mysql -e "SELECT msg_id,status,retry_count,last_error FROM outbox_message
 kafka-console-consumer.sh --bootstrap-server broker1:9092 \
   --topic pay.success --partition 5 --offset 8412297 --max-messages 1 \
   --property print.offset=true --property print.timestamp=true --property print.key=true
-# 输出：CreateTime:1741597961208  offset:8412297  key:ORDER-20250908-771234  value:{"msgId":"PAY:..."}
+# 输出：CreateTime:1757293961208  offset:8412297  key:ORDER-20250908-771234  value:{"msgId":"PAY:..."}
 
 # B. 按 key 查（不知道 offset 时用；Kafka 没有按 key 索引，只能用 offset 反查 + 逐条扫，
 #    生产上建议用「消息轨迹」或把 (key → offset) 写进一张索引表，见 §27.8）
@@ -207,7 +207,7 @@ kafka-console-consumer.sh --bootstrap-server broker1:9092 \
 # C. 按时间查 offset（用于「某个时间段的都丢了」）
 #    先用时间戳换 offset，再按 offset 区间取
 kafka-run-class.sh kafka.tools.GetOffsetShell --bootstrap-server broker1:9092 \
-  --topic pay.success --time 1741597900000
+  --topic pay.success --time 1757293900000
 # 输出：pay.success:5:8412100  （该时间点之后的第一条 offset）
 
 # D. 消息到底还在不在：最早/最晚可读 offset
@@ -243,8 +243,8 @@ kafka-consumer-groups.sh --bootstrap-server broker1:9092 \
 # point-service  pay.success  7     8,530,900       8,530,900       0       consumer-1-1      /10.0.3.17
 
 # 判读表（这张表能省你一小时）：
-#   LAG=0 且 CONSUMER-ID='-'      → 该分区无人消费：提交过位点但没分配（实例数×concurrency < 分区数）
-#   LAG>0 且 CONSUMER-ID='-'      → 分区没分配出去，堆积会一直涨（同上，或 rebalance 卡住）
+#   LAG=0 且 CONSUMER-ID='-'      → 该分区没有 owner：组内无活跃成员，或正在 rebalance；不是「线程不够」
+#   LAG>0 且 CONSUMER-ID='-'      → 同上，堆积会一直涨（查组成员与 rebalance 状态）
 #   LAG=0 且业务没数据            → 位点提前提交了（第 26 章事故二）
 #   LAG 均匀上涨 + 有 consumer    → 消费能力不足（第 25 章）
 #   LAG 只在一个分区涨 + 有 consumer → 毒消息卡住
@@ -340,7 +340,7 @@ SELECT d.idem_key, d.consumer_group, d.created_at
 
 **故障三：顺序错乱（PAID 覆盖了 CANCELLED）**
 
-- **现象**：1,860 笔已取消订单被改回「已支付」，1,240 件实际发货。
+- **现象**：640 笔已取消订单被改回「已支付」，410 件实际发货。
 - **排查**：
   ```bash
   # 同一订单的两条消息，落在不同分区 = 破序的第一嫌疑
@@ -354,23 +354,22 @@ SELECT d.idem_key, d.consumer_group, d.created_at
 - **修复**：所有订单事件统一用 `order_id` 做 key；状态更新加 `WHERE status IN (...)` 与 `version` 条件（第 25 章）。
 - **防复发**：Topic 的 `key.field` 写进登记表并 CI 校验；状态迁移合法性 SQL 每天跑（第 25 章 §25.7）。
 
-**故障四：不再消费（24 个分区只有 18 个有 owner）**
+**故障四：扩分区后吞吐不升反降（18 个线程扛 24 个分区）**
 
-- **现象**：lag 从 20:00 起持续上涨，但消费组「有成员」，没有报错。
+- **现象**：Topic 从 12 扩到 24 分区后，lag 从 20:00 起持续上涨；消费组「有成员」、没有报错，实例 CPU 也不高。
 - **排查**：
   ```bash
   $ kafka-consumer-groups.sh --bootstrap-server broker1:9092 --describe --group order-service --members
   # GROUP           CONSUMER-ID       HOST          #PARTITIONS
-  # order-service   consumer-1-1      /10.0.3.17    6
-  # order-service   consumer-1-2      /10.0.3.17    6
-  # order-service   consumer-1-3      /10.0.3.17    6      ← 3 实例 × 6 = 18 个线程
-  $ kafka-consumer-groups.sh --bootstrap-server broker1:9092 --describe --group order-service \
-    | awk '$6=="-" {print $3}' | wc -l
-  # 6                                                       ← 6 个分区没人要
+  # order-service   consumer-1-1      /10.0.3.17    2
+  # order-service   consumer-1-2      /10.0.3.17    1
+  # ...（共 18 个成员：6 个各 2 分区，12 个各 1 分区）
+  $ kafka-consumer-groups.sh --bootstrap-server broker1:9092 --describe --group order-service
+  # partition 5/11/... 的 CONSUMER-ID 有值，但部分消费者各挂 2 个分区
   ```
-- **根因**：Topic 扩到 24 分区后，消费者仍是 3 实例 × `concurrency=6` = 18 个线程，多出的 6 个分区**没有线程可分配**（Kafka 不会把两个分区给同一线程）。这类问题不会报错，只会静默堆积。
-- **修复**：实例数 × `concurrency` ≥ 分区数（4 实例 × 6 = 24）；或把 `concurrency` 提到 8。
-- **防复发**：把 `分区数 / (实例数 × concurrency)` 做成指标，> 1 即告警；扩容分区后必须同步加消费者（第 25 章）。
+- **根因**：Topic 扩到 24 分区后，消费者仍是 3 实例 × `concurrency=6` = 18 个成员；24 个分区里有 6 个只能和别的分区共用消费者。热点分区被同成员的冷分区拖住，整体消费速率上不去——**不是分区无人消费**。Kafka 会把所有分区都分出去，只是分得不均匀。
+- **修复**：实例数 × `concurrency` ≥ 分区数（4 实例 × 6 = 24）；或把 `concurrency` 提到 8。让每个分区独占线程，热点分区才不会互相拖累。
+- **防复发**：把 `分区数 / (实例数 × concurrency)` 做成指标，> 1 即告警（表示并行度不足）；扩容分区后必须同步加消费者或提高 concurrency（第 25 章）。
 
 **故障五：堆积卡死（单分区 lag 涨，线程永远阻塞）**
 
@@ -484,7 +483,7 @@ func (p *Publisher) PublishMaybeExternal(ctx context.Context, topic, key string,
 | 变更动作 | JSON | Protobuf | Avro（BACKWARD） | 结论 |
 | --- | --- | --- | --- | --- |
 | 新增可选字段 | ✅ 安全 | ✅ 用新 tag | ✅ 必须有 default | 安全 |
-| 删除字段 | ⚠️ 老消费者忽略，新消费者拿不到 | ⚠️ 必须 `reserved` tag，永不复用 | ❌ 破坏兼容 | 先停止写入，两个版本后再删 |
+| 删除字段 | ⚠️ 老消费者忽略，新消费者拿不到 | ⚠️ 必须 `reserved` tag，永不复用 | ✅ 新 schema 忽略旧字段（FORWARD 才要求旧字段有 default） | 保守做法仍是先停写一个版本 |
 | 改字段类型（int→string） | ❌ 运行时才炸 | ❌ wire type 变了，解析错位 | ❌ | 只能加新字段 |
 | 改字段名 | ✅（按名匹配） | ✅（按 tag，名字无关） | ⚠️ 依赖 alias | Protobuf 占优 |
 | 枚举新增值 | ⚠️ 老代码 `switch` 落到 default | ⚠️ 老代码可能不认识（保留 `UNRECOGNIZED`） | ✅ 有 default 则安全 | 消费端必须有 default 分支 |
@@ -527,7 +526,8 @@ buf breaking --against 'https://github.com/org/protos.git#branch=main' .
 # Kafka 侧：确认 Topic 上到底用的哪个 schema（Confluent 体系）
 curl -s http://schema-registry:8081/subjects/billing.invoice-value/versions/latest | jq .
 # {"subject":"billing.invoice-value","version":7,"schema":"..."}
-# 兼容模式：BACKWARD 允许「删字段」，FORWARD 允许「加字段」，FULL 两者都要
+# 兼容模式：BACKWARD=新 schema 读旧数据（删字段安全，加字段需 default）；
+# FORWARD=旧 schema 读新数据（加字段安全，删字段需旧字段有 default）；FULL 两者都要
 curl -s http://schema-registry:8081/config/billing.invoice-value
 # {"compatibilityLevel":"BACKWARD"}
 ```

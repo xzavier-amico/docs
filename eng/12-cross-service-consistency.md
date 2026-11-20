@@ -280,7 +280,7 @@ func (h *StockHandler) release(ctx context.Context, evt Event) error {
 }
 ```
 
-**协同版的订单服务**：维护订单状态机 `CREATED → STOCK_RESERVED → PAID → CLOSED/REFUNDED`，订阅 `stock.reserved`、`payment.succeeded`、`payment.failed`，每次迁移用条件更新：
+**协同版的订单服务**：维护订单状态机 `CREATED → STOCK_RESERVED → PAID → CLOSED/REFUNDED`，并允许超时关单 `CREATED → CLOSED`、`STOCK_RESERVED → CLOSED`（同时释放库存）；订阅 `stock.reserved`、`payment.succeeded`、`payment.failed`，每次迁移用条件更新：
 
 ```sql
 UPDATE orders

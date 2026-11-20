@@ -148,7 +148,7 @@ CDC     ：数据库决定时刻（commit）        → 需要「日志位点 + 
 **四条选型判据**（按优先级）：
 
 1. **量级 > 100 万/天**：别用 DB 轮询，也别用「每单一个 cron」；用 Redis ZSet 或 MQ。
-2. **精度要求 < 1s**：只能时间轮或 MQ 5.x 定时消息；Redis 轮询 100ms 也能做到，但 Redis QPS 会被放大（100 万任务 / 100ms = 1000 万次 ZRANGEBYSCORE/天）。
+2. **精度要求 < 1s**：只能时间轮或 MQ 5.x 定时消息；Redis 轮询 100ms 也能做到，但轮询 QPS = 1/间隔（100ms → 10 次/s，约 86 万次/天），与任务总数无关；真正要控制的是每次取出的到期任务数和处理吞吐。
 3. **不能丢**：时间轮必须配「落库 + 启动重建」，否则重启丢任务（订单永不关单）。
 4. **允不允许重复**：五种实现**都可能重复**（Redis 取出后崩溃、MQ 重投、DB 轮询多实例），所以**幂等不是可选项**。
 
@@ -458,11 +458,14 @@ CREATE TABLE job_execution (
 INSERT INTO job_execution (job_name, biz_date, shard_no, status, instance_id)
 VALUES ('reconcileDaily', CURDATE(), 0, 0, 'pod-7f9c')
 ON DUPLICATE KEY UPDATE
-  -- 只允许「上次失败/超时」或被接管的任务被重新抢占
-  status = IF(status IN (2,3), 0, status),
+  -- 只允许「上次失败/超时」或被接管的任务被重新抢占。
+  -- 注意：MySQL 的 SET 从左到右求值，必须先写 instance_id/started_at，
+  -- 最后再改 status，否则后面的 IF(status IN (2,3)) 会读到已被改成 0 的新值。
   instance_id = IF(status IN (2,3), VALUES(instance_id), instance_id),
-  started_at = IF(status IN (2,3), NOW(3), started_at);
--- 判断依据：affected rows = 1 且 status=0 → 我抢到了；否则跳过
+  started_at = IF(status IN (2,3), NOW(3), started_at),
+  status = IF(status IN (2,3), 0, status);
+-- 判断依据不要只看 affected rows（受 CLIENT_FOUND_ROWS/驱动配置影响）：
+-- 更新后再 SELECT ... FOR UPDATE，确认 instance_id 是自己且 status=0。
 
 -- 心跳：长任务必须续心跳，否则会被别人当「超时」接管
 UPDATE job_execution
@@ -489,10 +492,11 @@ public class ReconcileJob {
             INSERT INTO job_execution(job_name, biz_date, shard_no, status, instance_id)
             VALUES ('reconcileDaily', CURDATE(), 0, 0, ?)
             ON DUPLICATE KEY UPDATE
-              status = IF(status IN (2,3), 0, status),
-              instance_id = IF(status IN (2,3), VALUES(instance_id), instance_id)
+              -- 必须先写 instance_id，最后改 status（MySQL SET 从左到右求值）
+              instance_id = IF(status IN (2,3), VALUES(instance_id), instance_id),
+              status = IF(status IN (2,3), 0, status)
             """, inst);
-        if (claimed == 0) return;                       // 没抢到：直接退出，不报错
+        if (claimed == 0) return;                       // 没抢到：直接退出（稳妥做法：再 SELECT 校验 instance_id）
 
         ScheduledFuture<?> hb = scheduler.scheduleAtFixedRate(
             () -> jdbc.update("UPDATE job_execution SET heartbeat_at=NOW(3) " +
@@ -708,7 +712,8 @@ DELETE FROM outbox_message
 ```bash
 # 灌 10 万个「5 秒后到期」的任务，测量实际触发时间分布
 redis-cli -h redis1 EVAL "$(cat seed.lua)" 1 delay:{bench} 100000 5000
-# seed.lua: for i=1,ARGV[1] do redis.call('ZADD',KEYS[1], tonumber(ARGV[2])+i, 'task-'..i) end
+# seed.lua: local t=redis.call('TIME'); local base=t[1]*1000+math.floor(t[2]/1000)+tonumber(ARGV[2])
+#           for i=1,ARGV[1] do redis.call('ZADD',KEYS[1], base+i, 'task-'..i) end   -- ARGV[2]=延迟毫秒
 
 # 统计：P50/P99/最大值 与目标 5000ms 的偏差（精度 = tick 或轮询间隔）
 redis-cli -h redis1 ZCOUNT delay:{bench} -inf +inf

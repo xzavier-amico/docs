@@ -351,11 +351,12 @@ UPDATE saga_branch
 **③ 补偿失败：超过重试上限仍未成功**
 
 ```sql
--- 检测：CANCEL_FAILED 且达到上限，或 next_retry_at 已过很久
+-- 检测：CANCEL_FAILED 且达到上限，或 next_retry_at 已过期很久
 SELECT xid, branch_id, retry_count, next_retry_at, last_error, updated_at
   FROM saga_branch
  WHERE status='CANCEL_FAILED'
-   AND (retry_count >= 8 OR updated_at < NOW() - INTERVAL 30 MINUTE)
+   AND (retry_count >= 8
+        OR (next_retry_at IS NOT NULL AND next_retry_at < NOW() - INTERVAL 5 MINUTE))
  ORDER BY updated_at;
 
 -- 修复：转人工队列，停止自动重试；人工处理后回写 DONE

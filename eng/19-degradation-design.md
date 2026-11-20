@@ -323,7 +323,10 @@ func (d *Degrader) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			r.Degraded, r.Level = true, CacheFallback
 			return r, nil
 		}
-		level = SmallModel // 缓存未命中，继续下一级
+		// 缓存未命中：直接降级到小模型（Go 的 switch 不会 fallthrough）
+		r, err := d.runWithTools(ctx, d.small, req)
+		r.Degraded, r.Level = true, SmallModel
+		return r, err
 
 	case SmallModel:
 		r, err := d.runWithTools(ctx, d.small, req)
@@ -346,8 +349,6 @@ func (d *Degrader) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	default:
 		return RunResult{}, errors.New("service temporarily unavailable")
 	}
-
-	return RunResult{}, errors.New("unreachable")
 }
 
 func (d *Degrader) runWithTools(ctx context.Context, m Model, req RunRequest) (RunResult, error) {
@@ -446,7 +447,7 @@ LIMIT 100;
 ```promql
 # 降级响应占比（按级别/原因）
 sum by (level, reason) (rate(degraded_responses_total[5m]))
-  / sum(rate(http_requests_total[5m]))
+  / scalar(sum(rate(http_requests_total[5m])))
 
 # 降级持续时间
 max by (flag) (feature_flag_enabled_duration_seconds)
