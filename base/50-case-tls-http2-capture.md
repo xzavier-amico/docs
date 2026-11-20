@@ -1,8 +1,8 @@
-# 50. 实例剖析：TLS 1.3 + HTTP/2，从握手消息到 DATA 帧
+# 50. 实例剖析：TLS 1.3 与 HTTP/2、HTTP/3，从握手到 DATA
 
 > **状态**：`已完成（初稿）` ｜ **所属**：第四部分 · 网络：从一根网线到一张证书（实例篇） ｜ **编号**：50 / 56
-> **本篇定位**：把端点的 HTTP/2 明文、TLS 记录和被动抓包的视角分开。实验在单进程内用两个 `MemoryBIO` 端点完成真实握手和 HTTP/2 请求，不打开监听端口，不改网络配置。
-> **读法**：§50.2 先明确字节边界；§50.5 最适合手算；§50.6 用 ALPN 对照说明“TLS 握手成功”不等于“应用协议谈成”。
+> **本篇定位**：用两组端点实验对照 HTTPS over TCP 与 HTTP/3。前者用 `MemoryBIO` 观察 TLS 记录与 HTTP/2 帧，后者用真实回环 UDP 和 QUIC 端点 qlog 观察握手、请求和流交付。两组都不改主机网络配置。
+> **读法**：§50.5 手算 TLS 记录开销，§50.6 看 ALPN 对照，§50.11 看同一条 QUIC 连接上两条流在出现缺口后各自如何交付。
 > **不在本篇**：TCP 状态机见 [41](41-tcp-handshake-and-close.md)，HTTP/2 语义与压缩见 [46](46-http-evolution.md)，TLS 信任与密钥见 [47](47-tls-and-certificates.md)。
 
 ## 50.1 引子：抓到了记录，不等于抓到了 HTTP 帧
@@ -208,3 +208,47 @@ s->c [(22, 122), (20, 1), (23, 23), (23, 437), (23, 97), (23, 69), (23, 250), (2
 ## 50.10 延伸阅读
 
 [46 HTTP/2 与 HPACK](46-http-evolution.md) · [47 TLS](47-tls-and-certificates.md) · [52 解析与重组](52-case-parsing-and-reassembly.md) · [RFC 8446：TLS 1.3](https://www.rfc-editor.org/rfc/rfc8446) · [RFC 9113：HTTP/2](https://www.rfc-editor.org/rfc/rfc9113) · [RFC 7301：ALPN](https://www.rfc-editor.org/rfc/rfc7301)。
+
+## 50.11 HTTP/3 对照：同一连接上，A 有缺口，B 能先完成吗？
+
+前半篇的 `MemoryBIO` 能看到 TLS over TCP 路径的**记录字节**，但没有跑 TCP，也看不到它是怎样分段的。这一节换成完整的 `aioquic` 两端、真实的本机 UDP socket 和 HTTP/3 状态机。**观测来自端点 qlog 和应用事件，不是网卡抓包。** 实验不启用 ECH，也不测 RTT、吞吐或丢包恢复性能。
+
+### 复现条件
+
+在仓库根目录运行；需要 Python 3、OpenSSL 和 Linux 的 `timeout`。脚本 [h3-loopback.py](examples/h3-loopback.py) 只绑定 `127.0.0.1` 的临时端口，在同一进程内驱动两个端点。自签证书仅被这次实验的客户端信任，校验的名称为 `localhost`。退出时关闭 socket 并清理临时证书，不启动后台服务。安装依赖需要能访问包源，**实验自身不访问外网**。
+
+```bash
+python3 -m venv /tmp/docs-h3-venv
+/tmp/docs-h3-venv/bin/python -m pip install 'aioquic==1.3.0'
+timeout 6s /tmp/docs-h3-venv/bin/python base/examples/h3-loopback.py
+```
+
+### 第一步：确认这是 HTTP/3，不是“有 UDP 响应”
+
+脚本等到两端都报告 `HandshakeCompleted` 且 ALPN 为 `h3`，才发送两个 `GET`。服务端在两条客户端发起的双向 QUIC 流（ID 为 `0` 和 `4`）上接收到请求头，再分别发回响应。两端 qlog 都记录了 `Initial / CRYPTO`、`Handshake / CRYPTO` 和 `1-RTT / STREAM`。这与 [RFC 9001](https://www.rfc-editor.org/rfc/rfc9001) 的分工一致：TLS 握手字节通过 `CRYPTO` 传输；HTTP/3 帧通过应用流发送，不在 `STREAM` 外再套一层 TLS record。实验中已用于请求的**应用流 0**，也不是握手通道。
+
+### 第二步：让流 0 缺一段，观察流 4
+
+| 时点 | 端点做了什么 | 客户端应当能交付什么 |
+| --- | --- | --- |
+| T0 | 两条流的响应头已发送；暂存包含流 0 第一段 DATA 的一个 UDP 数据报 | 只收到已交付的响应头，流 0 的正文起点还缺字节 |
+| T1 | 在后续数据报发送流 0 的 `A2` | 流 0 已收到后段，仍不能跳过 `A1` 向应用交付 |
+| T2 | 发送流 4 的 `B` 并结束该流 | 流 4 可完整交付 `B`，不因流 0 的缺口等待 |
+| T3 | 将暂存的数据报发给客户端 | 流 0 按顺序交付 `A1A2` 并结束 |
+
+这里的“暂存”发生在实验进程，数据报尚未写入 socket；不是在主机上随机丢包。短观察窗口内不把客户端 ACK 送回服务端，避免丢失恢复提前补掉人为制造的缺口。脚本断言暂存包只含本实验关心的流 0 数据帧，并校验流内容与完成顺序。端点使用虚拟时钟避免把机器调度抖动误当成协议行为，因此不引用墙钟时间作为性能结论。
+
+本机运行输出（`aioquic 1.3.0`）：
+
+```text
+ALPN: h3 h3
+server STREAM (id, offset, length): [(0, 5, 4), (0, 9, 4), (4, 5, 3)]
+while held: [4] {0: b'', 4: b'B'}
+after delivery: [0, 4] {0: b'A1A2', 4: b'B'}
+client [('1RTT', 'stream'), ('handshake', 'crypto'), ('initial', 'crypto')]
+server [('1RTT', 'stream'), ('handshake', 'crypto'), ('initial', 'crypto')]
+```
+
+`offset` 是**各自 QUIC 流的字节偏移**，含同一流前面的 HTTP/3 帧，既不是全连接偏移，也不是 TCP 序列号。`A1` 是 2 B 正文，在本例中连同 HTTP/3 DATA 的类型和长度字段占 4 B，所以在 qlog 看到 `length=4`，应用只读到 2 B。最后两行是从 qlog 提取的**类型集合**（已排序），不是按时间排列的抓包。没有单独观测 QUIC 包保护密钥、路径 MTU 或 ECH 接受确认。
+
+**实验支持的结论**：流 0 的后段已经到达，但不能越过自己流内的缺口；流 4 可以先完成。这反驳的是“QUIC 和单条 TCP 一样，必须等连接里所有更早的字节”。它**不证明**任意丢包只影响一条流，也不证明总延迟一定下降。若同一个包装了两条流的必要字节，或若两条流都在等同一个 QPACK 条目，还是可能一起等；连接流控和拥塞预算也仍共享。对照 [43](43-udp-and-quic.md) 与 [46](46-http-evolution.md) 区分这些不同的等待机制。

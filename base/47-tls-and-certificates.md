@@ -1,7 +1,7 @@
 # 47. TLS 与证书：密钥交换、证书链、SNI、1-RTT 与「为什么还是会被抓包」
 
 > **状态**：`已完成（初稿）` ｜ **所属**：第四部分 · 网络：从一根网线到一张证书 ｜ **编号**：47 / 56
-> **本篇定位**：Part IV 的第十篇。46 篇讲 HTTP 三代怎么解队头阻塞，本篇讲它们共用的那层壳：TLS 只承诺三件事——**机密性、完整性、对端身份**；前两件由 AEAD 与握手签名兑现，第三件完全押在证书链上。全篇一条推论链：`握手协商出一把只有双方知道的密钥` → `AEAD 用它同时买机密与完整` → `证书链证明对面的公钥属于这个名字` → `链上任何一环被跳过，前两件立刻归零`。
+> **本篇定位**：区分 TLS 的握手、记录保护和对端认证。常见 HTTPS over TCP 使用 TLS 记录；HTTP/3 使用 QUIC 集成的 TLS 1.3 握手，没有 TCP 路径上的 TLS record。正确验证链与服务名，才能把受保护通道绑定到预期对端；跳过认证不能保证抵御主动中间人，但不等于密文本身变成明文。
 > **读法**：§47.3 的 1.2/1.3 时序图与 §47.4 的 ECDHE 概念图是全篇支点，要能默画；§47.7 的「每一环」表可原样贴进上线检查单；§47.11 的四组命令都在本机真跑过；赶时间只读 §47.7、§47.9、§47.12、§47.14。
 > **不在本篇**：HTTP/2 帧与队头阻塞 → `base/46`；QUIC 的 0-RTT 与连接迁移 → `base/43`；DNS 信任模型与 DoH → `base/45`；证书签发流程、ACME 与 CA 商务不在本套范围；攻击面总表与用户身份 → `base/48`；椭圆曲线数学 → 本篇只给「它保证了什么、怎么被用错」。
 
@@ -96,7 +96,7 @@ Client                                        Server
   │◄════════════ Application Data ══════════════►│   1-RTT 后开始
 ```
 
-差别不在「少发一个包」，而在**密钥什么时候可用**：1.2 要等 ClientKeyExchange 到了才算完；1.3 在 ClientHello 里就递上了 DH 公钥，服务器回完第一条就能算出会话密钥，并把后续握手消息全部加密。叠加 TCP 的 1 RTT，才有「2-RTT 建连」；HTTP/2 省的是流，TLS 1.3 省的是趟。
+差别不在「少发一个包」，而在**密钥什么时候可用**：1.2 要等 ClientKeyExchange 到了才算完；1.3 在 ClientHello 里就递上了 DH 公钥，服务器回完第一条就能算出会话密钥，并把后续握手消息全部加密。叠加 TCP 的 1 RTT，才有「2-RTT 建连」。
 
 ### 真实字节对一遍
 
@@ -113,7 +113,7 @@ while p < end:                     # 扩展 TLV
     print(t, l, b[p+4:p+4+l][:8].hex()); p += 4 + l
 ```
 
-真实输出（节选注释是我加的）：
+已有输出节选（含字段注释）：
 
 ```
 total handshake bytes: 311
@@ -124,15 +124,9 @@ cipher_suites_len=62 -> 31 suites  ← 1.3 只有 3 个，其余 28 个是 1.2 �
 compression_len=1
 extensions_len=172
   ext  0 len= 15 SNI=demo.local    ← 明文域名，§47.8 的主角
-  ext 11 len=  4
-  ext 10 len= 22
-  ext 35 len=  0
-  ext 22 len=  0
-  ext 23 len=  0
-  ext 13 len= 42
   ext 43 len=  9 versions=0304,0303,0302,0301   ← 首选 1.3，三个 1.2 备胎
-  ext 45 len=  2
   ext 51 len= 38 key_share group=29 pub=32B     ← 0x001d=x25519，32 字节公钥
+  （另有 ext 10/11/13/22/23/35/45，共 172 字节）
 ```
 
 十个扩展、172 字节，就是 ClientHello 的全部「议价内容」。逐条对上表：
@@ -191,6 +185,8 @@ Early data was not sent
 
 第二行是关键：OpenSSL 默认不发 early data。这个默认是对的——0-RTT 只配幂等请求（GET 静态资源），服务端还要做单次 ticket、时间窗、限速。把「下单」「支付」放进 0-RTT，等于把重放攻击写进业务。
 
+---
+
 ## 47.4 密钥交换：RSA 把历史押在私钥上，ECDHE 不押
 
 静态 RSA 的会话密钥来自「客户端用服务器公钥加密的 premaster」，**服务器长期私钥直接参与密钥生成**。ECDHE 完全不同：
@@ -227,20 +223,13 @@ ECDHE:  K = a·b·G                          → 私钥泄 = 只能冒充未来
 | ECDSA P-256 签名 | 41,193.9 | ≈ 24.3 µs | 服务器 |
 | ECDSA P-256 验签 | 14,030.2 | ≈ 71.3 µs | 客户端 |
 
-这解释了：**服务器爱 ECDSA 证书**（签名 649 → 24 µs，约 27 倍，握手是最贵的操作之一）；**客户端有时嫌弃它**（验签 71 µs vs RSA 验签的 19 µs）。现实折中是「RSA 证书 + ECDHE 交换」或双证书按客户端能力选。
-
-用真实握手验证「有没有临时公钥」——`Server Temp Key` 这一行有没有，直接对应有没有 ECDHE：
+这解释了：**服务器爱 ECDSA 证书**（签名 649 → 24 µs，约 27 倍，握手是最贵的操作之一）；**客户端有时嫌弃它**（验签 71 µs vs RSA 验签的 19 µs）。现实折中是「RSA 证书 + ECDHE 交换」或双证书按客户端能力选。「有没有前向保密」在 `s_client` 输出里就是一行有没有 `Server Temp Key`：
 
 ```bash
-openssl s_client -connect 127.0.0.1:10601 -tls1_2 \
-    -cipher 'ECDHE-RSA-AES128-GCM-SHA256' -brief
-# Ciphersuite: ECDHE-RSA-AES128-GCM-SHA256
-# Server Temp Key: X25519, 253 bits        ← 有临时公钥，前向保密成立
-
-openssl s_client -connect 127.0.0.1:10601 -tls1_2 \
-    -cipher 'AES128-SHA:@SECLEVEL=0' -brief
-# Ciphersuite: AES128-SHA
-# （输出里没有 Server Temp Key 这一行）      ← 静态 RSA，前向保密不成立
+openssl s_client -connect 127.0.0.1:10601 -tls1_2 -cipher 'ECDHE-RSA-AES128-GCM-SHA256' -brief
+#   Server Temp Key: X25519, 253 bits        ← 有临时公钥，前向保密成立
+openssl s_client -connect 127.0.0.1:10601 -tls1_2 -cipher 'AES128-SHA:@SECLEVEL=0' -brief
+#   （没有这一行）                            ← 静态 RSA，前向保密不成立
 ```
 
 **「输出里少了一行」就是一条安全结论。** 这也是为什么 TLS 1.3 的套件里根本不存在 `AES128-SHA`：静态 RSA 被整个删了。
@@ -271,15 +260,15 @@ openssl s_client -connect 127.0.0.1:10601 -tls1_2 \
 <<< 17 03 03 07 4e   ← 1870 字节，里面是证书链
 ```
 
-三点：① 第一条记录写 `0x0301`（TLS 1.0）、后面写 `0x0303`，这是 middlebox compatibility mode；② **`0x17` 不代表「这是应用数据」**，1.3 把握手消息也塞进 `application_data` 加密，真实内层类型放在解密后的明文末尾，所以被动抓包看到 `17 03 03` 无法区分证书还是 HTTP；③ `0x14` 的 CCS 在 1.3 里没有密码学意义。
+三点：① 第一条记录写 `0x0301`（TLS 1.0）、后面写 `0x0303`，这是 middlebox compatibility mode；② **`0x17` 不代表「这是应用数据」**，1.3 把握手消息也塞进 `application_data` 加密；③ `0x14` 的 CCS 在 1.3 里没有密码学意义。
 
-上面第 ② 点不该只靠嘴说。把 socket 收到的**原始字节**截下来，搜证书里的名字：
+第 ② 点不该只靠嘴说。把 socket 收到的**原始字节**截下来，搜证书里的名字（`ctx` 关掉校验只为观察，`Spy` 覆盖 `recv_into` 攒字节）：
 
 ```python
-class Spy(socket.socket):                       # 记录服务端发来的每个字节
+class Spy(socket.socket):
     def recv_into(self, b, *a):
         n = super().recv_into(b, *a); raw.extend(bytes(b[:n])); return n
-ss = ctx.wrap_socket(s, server_hostname="demo.local")   # ctx 不校验，只为观察
+ss = ctx.wrap_socket(s, server_hostname="demo.local")
 ss.sendall(b"GET / HTTP/1.0\r\n\r\n"); ss.recv(65536)
 print(ss.version(), b.count(b"Base Lab"), b.count(b"demo.local"))
 ```
@@ -302,7 +291,7 @@ negotiated=TLSv1.2 server_bytes=2479
   rec[1] type=0x16 len=1848    ← Certificate 明文，名字直接可读
 ```
 
-**1.3 里 `demo.local` 出现 0 次，1.2 里出现 3 次。** 这不是「加密更强」，是 1.3 把握手后半段整体搬进了加密记录——被动观察者从此只能看到 `16 / 14 / 17 17 17` 这几个类型字节和长度。而 SNI 仍在 ClientHello 明文里（那是客户端→服务端方向，本节截的是服务端→客户端方向，所以看不到），这是 §47.8 的主题。
+**1.3 里 `demo.local` 出现 0 次，1.2 里出现 3 次。** 被动观察者从此只看到 `16 / 14 / 17 17 17` 几个类型字节和长度。SNI 仍在 ClientHello 明文里（客户端→服务端方向），那是 §47.8 的主题。
 
 ### nonce 与序列号防重放
 
@@ -414,7 +403,7 @@ Certificate:
 └──────────────────────────────┘
 ```
 
-三条规则各解释一个线上故障：① 服务器必须发 leaf + 所有中间证书，**不发根**（根在客户端信任库里）；漏发中间证书是「浏览器正常、curl/Java 报错」的头号原因。② 每一环都要验签名：用父公钥解子证书的 `signature`，比对 `Issuer`/`Subject` 与 `AKI`/`SKI`。③ **信任锚是「凭据」不是「推导」**：根自签，它可信只因被放进了 `/etc/ssl/certs/ca-certificates.crt`。整条链的安全性 = 根库的完整性。
+常见配置由服务端发送叶子证书及构造验证路径所需的中间证书，通常不必发送已在客户端信任库中的信任锚。名称及 `Issuer`/`Subject`、`AKI`/`SKI` 等字段可以帮助构造路径，不是验签的替代。客户端按证书签名算法核验每一环，并执行有效期、用途及适用的路径约束；信任锚来自客户端配置，不因为服务器发来一张自签证书就自动受信。
 
 ```bash
 $ openssl verify -CAfile root.crt -untrusted int.crt leaf.crt
@@ -424,21 +413,18 @@ $ openssl verify -CAfile root.crt leaf.crt          # 故意不给中间证书
 error 20 at 0 depth lookup: unable to get local issuer certificate
 ```
 
-同一个 leaf、同一个根，**只差一个 `-untrusted int.crt`**，结论从 OK 变成 error 20。这就是「链不全」的全部机制。
-
-服务器侧同样能复现——**只发 leaf、不发中间证书**，再让客户端补：
+同一个 leaf、同一个根，**只差一个 `-untrusted int.crt`**，结论从 OK 变成 error 20。服务器侧同样能复现——**只发 leaf、不发中间证书**，再让客户端补：
 
 ```
 $ openssl s_server -accept 10731 -cert leaf.crt -key leaf.key -www   # 注意没有 -cert_chain
 $ curl --cacert root.crt https://demo.local:10731/
 curl: (60) SSL certificate problem: unable to get local issuer certificate
-
 $ cat root.crt int.crt > bundle.crt          # 客户端自己把中间证书塞进信任文件
 $ curl --cacert bundle.crt https://demo.local:10731/
 http=200 verify=0                            ← 服务器没改，客户端「补链」就好了
 ```
 
-**「浏览器正常、curl/Java 报错」的机制就在这里**：浏览器有 AIA chasing（顺着证书里的 URL 去下载缺失的中间证书）和缓存，curl 不做这件事。所以「链不全」不是「证书错了」，是「客户端拿不到那半张」。修法只有一条：把 `fullchain.pem` 发给客户端。
+**「浏览器正常、curl/Java 报错」的机制就在这里**：浏览器有 AIA chasing（顺着证书里的 URL 去下载缺失的中间证书）和缓存，curl 不做这件事。修法只有一条：把 `fullchain.pem` 发给客户端。
 
 ### 交叉签名：真实世界的链有 4 张
 
@@ -457,7 +443,7 @@ http=200 verify=0                            ← 服务器没改，客户端「�
 
 第 3 张的 issuer 不是它自己，而是 Comodo 的老根 `AAA`——这就是**交叉签名**：新根想被信任，但老客户端根库里没有它，于是让老根给新根签一张「同名同公钥」的证书，随链发出。新客户端认得自签的新根，链在第 3 张结束；老客户端走 `AAA` 这条边也能到达信任锚。
 
-**所以「证书链」在实现里是一张图，不是一条链**：同一主体可能有多张证书，客户端要做的是「从 leaf 出发，在证书图里搜一条到信任锚的路」。这解释了为什么老设备上「换个 CA 就好了」——不是证书错了，是它的根库里没有那条边。
+**所以「证书链」在实现里是一张图，不是一条链**：客户端要做的是「从 leaf 出发，在证书图里搜一条到信任锚的路」。这解释了为什么老设备上「换个 CA 就好了」——不是证书错了，是它的根库里没有那条边。
 
 顺带一个可推导的数字：本机 leaf DER 943 B、中间证书 892 B，两张 1835 B；`s_client` 报告 `SSL handshake has read 2396 bytes`——剩下约 560 B 是 ServerHello、CertificateVerify、Finished 与记录头。**首连要传 2 KB 以上证书，这正是会话恢复存在的理由。**
 
@@ -536,8 +522,8 @@ error 18 at 0 depth lookup: self-signed certificate
 
 八条输出里藏着三个必须记住的事实：
 
-1. **错误码是分层的**：`10/9` 是时间、`18/20` 是链、`23` 是吊销、`25` 是层级、`26` 是用途、`62` 是名字。看到码就知道该改哪一行配置，不用猜。
-2. **`-crl_check` 不加就永远 OK**——吊销是「你要求它才查」，不是默认行为。这就是 §47.7 表里第 ⑦ 行写「视策略」的原因。
+1. **错误码是分层的**：`9/10` 是时间、`18/20` 是链、`23` 是吊销、`25` 是层级、`26` 是用途、`62` 是名字。看到码就知道该改哪一行配置，不用猜。
+2. **`-crl_check` 不加就永远 OK**——吊销是「你要求它才查」，不是默认行为。这就是表里第 ⑦ 行写「视策略」的原因。
 3. **同一张证书换个 `-purpose` 结论就翻转**（`error 26` ↔ `OK`）。用途检查不是证书属性，是「你拿它干什么」的匹配。
 
 浏览器那句「你的连接不是私密连接」，背后就是这张码表里的某一个数字。**浏览器没有魔法，它只是把这七步全做了一遍，而且不给你关掉的按钮**（企业策略除外）。
@@ -557,7 +543,7 @@ error 18 at 0 depth lookup: self-signed certificate
 
 ## 47.8 SNI 与多租户：一个 IP 托管一万个域名，靠明文里一个字符串
 
-服务器在第一步就要决定用哪张证书，而这时还没有会话密钥——**鸡生蛋**：要加密 ClientHello 得先有密钥，要有密钥得先知道用哪张证书，要知道用哪张证书得先读 ClientHello。所以 `server_name` 扩展只能明文。
+普通 TLS 需要让服务端先读客户端发来的握手参数，再选择虚拟主机、证书和协商参数。没有 ECH 时，客户端发出的 `server_name` 扩展一般可从 ClientHello 读到；服务器的证书在 TLS 1.3 中随后受握手密钥保护。**前者可见不意味着后者也可见**。这不是说最初的名称在设计上只能明文：ECH 使用握手前获得的独立配置和公钥保护内层 ClientHello。
 
 服务端视角的原始字节（`s_server -tlsextdebug`，真实输出）：
 
@@ -614,11 +600,47 @@ $ openssl s_client -connect 127.0.0.1:10621 -servername other.local | grep '^sub
 subject=C = CN, O = Base Lab, CN = other.local    ← 拿到该名字那张
 ```
 
-同一个端口、同一个进程，**只差一个 24 字节的扩展，证书就换了**。这就是「一个 IP 托管一万个域名」的全部机制，也是「IP 直连 HTTPS 必报错」的根。
+这个实验说明同一个入口可以按 SNI 选择不同证书。某次配置在 SNI 缺失时返回默认证书，不代表所有入口都这样处理；有些会拒绝。按 IP 访问也不是必报错：证书若有匹配的 `iPAddress` SAN 且信任链有效，仍可通过验证。**SNI 用于声明或选择，不是客户端验证服务身份的依据本身**。
 
-ALPN 在同一个 443 上再分一层：ClientHello 带 `h2`、`http/1.1` 列表，服务器选一个写进 `EncryptedExtensions`（curl 会打 `* ALPN: offers h2,http/1.1` 与 `* ALPN: server accepted h2`）。**所以 443 上有两层键**：SNI 决定哪个站点，ALPN 决定哪种协议。这也是「只放行 443 等于放行一切」的原因——两个键都可以是任意值。
+ALPN 协商要用哪个应用协议；SNI 声明期望的服务器名；HTTP `Host` / `:authority` 在应用消息里。三者作用不同。普通 TLS 1.3 的 ClientHello 可以露出客户端的 ALPN 候选，但服务端选中结果出现在受保护的 `EncryptedExtensions`，不能只凭候选列表判断该连接到底用了哪一个。HTTP/3 的 TLS 握手则走 QUIC `CRYPTO` 帧，见 [43 §43.5](43-udp-and-quic.md)。
 
-ECH（Encrypted Client Hello）想补掉 SNI：客户端从 DNS 的 HTTPS 记录拿服务器公钥，加密整个 ClientHello，外层只留 cover name。落地慢有三个硬原因：要先有可信 DNS（否则公钥被劫持，→ `base/45`）；中间盒全部失效（防火墙、CDN 都靠 SNI 分流）；需要两端同时升级且失败要能优雅回退。**所以到 2026 年，SNI 明文仍是流量分析的第一根支柱。**
+### ECH：保护初始服务名，而不是隐藏整条连接
+
+[ECH（RFC 9849）](https://www.rfc-editor.org/rfc/rfc9849) 处理的缺口在 **ClientHello 发出时**：普通 TLS 1.3 会加密服务器后续发出的证书，却不保密客户端初始声明的服务名。路径设备不必解密 HTTP 就可能看到普通 SNI。ECH 将 ClientHello 分成外层和内层：外层仍是语法完整、可解析的 ClientHello，通常带公开名称；真实目标的 SNI 和需要保护的协商信息位于内层。**外层可以照常被观察，目标名不以普通 SNI 的形式出现在外层。**
+
+```text
+客户端已获 ECHConfig
+         │
+         ├─ ClientHelloInner：目标 SNI、内层 ALPN 候选等
+         │                    │ 用入口的 ECH 公钥做 HPKE 加密
+         │                    ▼
+         └─ ClientHelloOuter：公开名称 + ECH 加密载荷 → 面向客户端的入口
+                                                   └─ 解开内层后按正常 TLS 语义处理
+```
+
+客户端常通过 DNS HTTPS/SVCB 记录的 `ech` 参数获取含公钥与公开名称的配置（[RFC 9848](https://www.rfc-editor.org/rfc/rfc9848)）；配置也可以由其他机制预先提供。这里有**两种用途不同的公钥**：ECH 公钥用来保护开场的内层消息，TLS 证书的公钥用来验证预期服务持有相应私钥。二者不是一把钥匙，也不能相互替代。入口在共享模式下可以自己终止 TLS；在拆分模式下，能处理内层握手的入口与终止业务 TLS 的后端可以分开。**能看到内层名字，不代表持有业务会话密钥。**
+
+### 看见扩展、接受 ECH、应用成功：三笔不同的记录
+
+| 看到什么 | 支持的结论 | 不能据此断定 |
+| --- | --- | --- |
+| DNS 回答有 `ech` 参数 | 客户端可获得一份配置 | 所选端点实际持有匹配密钥，或这次用了 ECH |
+| 外层 ClientHello 里有 ECH 扩展 | 有该扩展；可能只是在做 GREASE | 真实内层已被服务端解开，或目标名已得到预期保护 |
+| 客户端明确记录 ECH 被接受 | 本次握手按内层语义继续 | 目标证书验证或 HTTP 授权已经成功 |
+| 业务请求成功 | 应用服务给了响应 | 该连接一定使用了 ECH；仍应回看端点的协商状态 |
+
+ECH 是否被接受由协议中的**接受确认**判定，正常路径由客户端核对 ServerHello 中的确认值，涉及 HelloRetryRequest 时另有对应的确认规则；它不是简单找一个明文的“ECH 成功”标志。若真实 ECH 提议被拒绝，**拒绝分支上不能直接发送原业务请求**。客户端会按规范核验公开名称的外层握手，有条件地使用可信重试信息，或报告失败；不要将一般超时、不受信的外层证书或一次失败视为“可以安全地关掉 ECH”的信号。详见 [RFC 9849 §6.1.4–§6.1.7](https://www.rfc-editor.org/rfc/rfc9849#section-6.1.4)。
+
+### 防御边界：ECH、加密 DNS、证书验证各保护什么？
+
+| 问题 | 对应机制 | 仍然暴露或仍需确认 |
+| --- | --- | --- |
+| 路径从握手直接读出目标名称 | 成功协商的 ECH 保护内层 ClientHello | 外层公开名称、目的 IP、尺寸与时序依然可见；入口也可能看到内层名称 |
+| 路径从 DNS 查询读出目标名称 | DoH、DoT 或 DoQ 保护客户端到所选解析器这段 | 所选解析器仍看到问题；ECH 不替 DNS 加密 |
+| 客户端连到了冒充目标的端点 | 正常 TLS 证书链与期望服务名验证 | ECH 不证明业务端点身份，不为跳过证书检查提供理由 |
+| 连接或路由被丢弃 | 属于可达性与策略问题，应看端点及授权策略日志 | ECH 不保证连接可达，也不承诺匿名 |
+
+ECH 与 TCP 或 QUIC 并不互斥。QUIC Initial 的保护不是针对路径观察者的机密性保证；它恢复出来的仍然是 ClientHello。若 ECH 确实被接受，恢复 Initial 也只会看到**外层**握手，不等于能读出内层。运维排障建议把同一次请求的配置来源、所选端点、外层握手认证、ECH 接受状态、最终服务名校验和应用结果分别记账。在同一服务多入口部署时，配置与入口状态不一致也可能表现为握手重试；不要只凭一张客户端超时截图归因到 SNI 策略。名称过滤的其他同形故障见 [48 §48.6](48-defense-and-app-auth.md)；本节是规范剖析，**没有运行 ECH 协商实测**。
 
 ---
 
@@ -689,12 +711,12 @@ issuer=C = CN, O = Corp IT, CN = Corp Root CA            ← 唯一的破绽在�
 | 可见的 | 从哪来 | 能推出什么 |
 | --- | --- | --- |
 | 目标 IP/端口 | IP/TCP 头 | 哪家云、哪个 CDN |
-| **SNI** | ClientHello 明文扩展 | **确切域名**（除非 ECH） |
+| **SNI** | 普通 ClientHello 的扩展；有 ECH 时区分内外层 | 观察点可见的握手声明，不等同于最终访问的 HTTP `:authority` 或 URL |
 | 包长与方向 | IP 长度、TCP seq | 页面大小、下载还是上传、视频码率 |
 | 时序与间隔 | 到达时间 | 交互式还是批量、有没有人在打字 |
 | 连接时长/次数 | TCP 状态 | 长轮询、SSE、心跳周期（→ `go/39`） |
 
-**加密只加了外壳**：IP、TCP、SNI 全在壳外。这也是 ◆49 的主题——TLS 借用、record 层复用、长度指纹与填充，全是在和这一栏搏斗。
+这些线索只支持有边界的推断。[49](49-case-vless-reality-vision.md) 将中继两侧的密钥与记录边界分开，[48](48-defense-and-app-auth.md) 解释如何核对它们是否与某次策略拒绝相关。[50](50-case-tls-http2-capture.md) 则用端点实验区分密文记录与 HTTP 帧。
 
 ---
 
@@ -840,7 +862,7 @@ curl -sv -o /dev/null https://example.com 2>&1 \
 < HTTP/2 200
 ```
 
-这九行就是一次 TLS 1.3 握手的人类可读版。**注意 `Certificate (11)` 在 1.3 里是密文**，抓包看不到 `subject`；那行 `subject` 是 curl 解密后打印的。
+这九行就是一次 TLS 1.3 握手的人类可读版。**注意 `Certificate (11)` 在 1.3 里是密文**，抓包看不到 `subject`；那行 `subject` 是 curl 解密后打印的。而 `expire date` 只有 90 天——正是 §47.7 说的「短有效期替代吊销」。
 
 ### ⑤ 把「1-RTT」量出来
 
@@ -878,16 +900,7 @@ TLS1.2: connect=0.040165 appconnect=0.125519
 
 `connect ≈ 40 ms` = TCP 1 RTT（20 去 + 20 回）。`appconnect - connect`：1.3 是 44 ms ≈ 1 RTT，1.2 是 85 ms ≈ 2 RTT。**1.3 省掉的就是那一个 RTT**，不是「握手更快」这种模糊说法。跨洋 RTT 150 ms 时，1.2 要多等 150 ms，而 1.3 不用——这就是为什么 1.3 对高延迟链路的价值远大于对同机房的价值。
 
-顺带把 1.2 的「2-RTT」在报文层数出来（`-msg` 里的 flight 分界）：
-
-```
->>> ClientHello
-<<< ServerHello / Certificate(1848) / ServerKeyExchange / ServerHelloDone    ← flight 1
->>> ClientKeyExchange / CCS / Finished                                        ← flight 2
-<<< NewSessionTicket / CCS / Finished                                         ← flight 3
-```
-
-三条 `<<<` flight 里，只有前两条是握手必需，第三条与客户端的 flight 2 在时间上重叠。所以 1.2 的握手本身是 2 RTT，加 TCP 共 3 RTT——和上表一致。
+1.2 的「2-RTT」在报文层能直接数出来（`-msg` 的 flight 分界）：`>>> ClientHello` / `<<< ServerHello+Certificate(1848)+ServerKeyExchange+ServerHelloDone`（flight 1）/ `>>> ClientKeyExchange+CCS+Finished`（flight 2）/ `<<< NewSessionTicket+CCS+Finished`（flight 3）。第三条与客户端 flight 2 在时间上重叠，所以握手本身 2 RTT，加 TCP 共 3 RTT——和上表一致。
 
 ---
 
@@ -961,7 +974,7 @@ nonce = iv XOR (0…0||seq)，seq 不上线；AAD = 记录头
         23 已吊销 ｜ 25 pathlen 超限 ｜ 26 用途不符 ｜ 62 域名不符
 
 【SNI】
-ClientHello 明文扩展 id=0；服务器靠它选证书；ECH 未普及
+普通 ClientHello 的 server_name 扩展为 0；服务端可据此选证书，客户端仍要独立验证名称；ECH 成功时目标名在内层
 一个 IP 万域名 = L4 ssl_preread 选后端 + 每租户证书 + ALPN 再分层
 通配符只吃一个 label：a.demo.local 命中 *.demo.local，a.b.demo.local 不命中
 
@@ -1034,7 +1047,7 @@ AES-256-GCM 3.19 GB/s → 10 Gbps 用 39% 单核
 | TLS 上面那层：HTTP/1.1 → 2 → 3，队头阻塞与帧 | → `base/46` |
 | TCP 三次握手、状态机与 TIME_WAIT（TLS 之前那个 RTT） | → `base/41` |
 | UDP 与 QUIC：把 TLS 1.3 搬进 QUIC，1-RTT/0-RTT 与连接迁移 | → `base/43` |
-| DNS 安全：DoT/DoH、DNSSEC，ECH 的公钥为何必须从 DNS 拿 | → `base/45` |
+| DNS 服务绑定与加密解析：HTTPS/SVCB 如何提供 ECH 配置、DoH 保护哪一段 | [44](44-dns-protocol.md) · [45](45-dns-security.md) |
 | 应用层认证总表：TLS 只认证服务器，用户身份要靠 OAuth2/OIDC/JWT/mTLS | → `base/48` |
 | 实例：VLESS + Reality + Vision——证书借用、record 层复用、长度指纹 | → `base/49` |
 | 实例：抓一次 TLS 1.3 + HTTP/2，逐帧解剖 | → `base/50` |

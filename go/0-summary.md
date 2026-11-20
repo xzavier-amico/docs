@@ -9,7 +9,7 @@
 | 项 | 说明 |
 | --- | --- |
 | 目标读者 | 3 年以上 Java 经验，熟 JVM / 集合 / 并发 / Spring；对 Go 只停留在「能看懂 hello world」 |
-| 语言基准 | **Go 1.24 ~ 1.25+**（含 1.24 Swiss Table map、1.25 Green Tea GC、cgroup 感知 GOMAXPROCS、`encoding/json/v2` 实验特性） |
+| 语言基准 | **Go 1.24 ~ 1.25+**（含 1.24 默认 Swiss Table map、1.24 默认 HashTrieMap 的 `sync.Map`、1.25 容器感知 GOMAXPROCS、`GOEXPERIMENT=greenteagc` 与 `encoding/json/v2` 两个实验特性） |
 | 篇幅规划 | 9 个部分 · **54 章** · 每章 1 个文件，可独立阅读，也可连成体系 |
 | 风格 | 轻松、类比多、Java 对照只出现在「你会猜错的地方」、先直觉后源码再回工程、**同一个概念绝不讲两遍** |
 | 文件约定 | `go/0-summary.md`（本文件）+ `go/1-xx.md` … `go/54-xx.md` |
@@ -154,7 +154,7 @@
 | # | 章节 | 你将真正搞懂 | 源码 / 框架坐标 |
 | --- | --- | --- | --- |
 | 27 | 编译链路：AOT 与 JIT 的路线之争 | `go build` 全流程（lexer → parser → typecheck → SSA → 机器码 → link）；内联阈值、边界检查消除、nil check 消除、PGO（1.21）；`go tool compile -S` 读汇编；静态二进制与毫秒级启动；**为什么 Go 不需要预热而 Java 需要**，代价是什么 | `cmd/compile`、`internal/ssa` |
-| 28 | GC：三色标记、混合写屏障与调参 | 并发标记清扫、三色不变式与**混合写屏障（Dijkstra + Yuasa）**；mark assist；GC pacer 与 `GOGC`；`GOMEMLIMIT`（1.19）软限制；两次 STW；栈扫描与安全点；scavenger 与 RSS；**Green Tea GC（1.25，按 span 批量扫描）**；`gctrace` 观测；与 G1/ZGC/分代假说对照（Go 为何不做分代、不做压缩、不做对象移动） | `runtime/mgc.go`、`runtime/mbarrier.go` |
+| 28 | GC：三色标记、混合写屏障与调参 | 并发标记清扫、三色不变式与**混合写屏障（Dijkstra + Yuasa）**；mark assist；GC pacer 与 `GOGC`；`GOMEMLIMIT`（1.19）软限制；两次 STW；栈扫描与安全点；scavenger 与 RSS；**Green Tea GC（1.25 实验，`GOEXPERIMENT=greenteagc`，按 span 批量扫描）**；`gctrace` 观测；与 G1/ZGC/分代假说对照（Go 为何不做分代、不做压缩、不做对象移动） | `runtime/mgc.go`、`runtime/mbarrier.go` |
 | 29 | pprof 与 trace 实战 | CPU/heap/goroutine/mutex/block profile 的采样原理；火焰图解读；execution trace 里 G 的状态机；`-benchmem` + `benchstat`；微基准的五个陷阱；线上 profile 的安全做法；**用它定位 Agent 的 token 流延迟与工具热点** | `net/http/pprof`、`runtime/trace` |
 | 30 | 性能优化：分配、锁、批处理 | 分配优化（预分配 cap、对象复用、`sync.Pool`、避免装箱）；字符串与字节处理；锁优化三板斧（分片、原子、无锁读）；syscall 与 IO 批处理；内存对齐与缓存友好；**先测量后优化**的纪律与优化台账 | sonic、fasthttp、pprof 案例 |
 | 31 | JSON 编解码：性能与协议设计 | `encoding/json` 的反射 + 字段缓存；tag 与 `omitempty` 的谎言；`RawMessage` 延迟解析；**`Decoder` 流式解码（JSONL / SSE）**；数字精度（`float64` vs `json.Number`）；**`encoding/json/v2`（1.25 实验）**；sonic/easyjson 的取舍；**LLM 结构化输出的严格解码（DisallowUnknownFields + schema 校验）** | `encoding/json`、sonic、jsonschema |

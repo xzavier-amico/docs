@@ -263,7 +263,7 @@ location /api/stream {
 - HTTP/2 下禁止 `Connection: keep-alive` 这类 hop-by-hop 头，也**不支持 `SetWriteDeadline`**（`ResponseController` 返回 `ErrNotSupported`）；
 - Go 1.24 起可以用 `http.Server{Protocols: ...}` 直接开启明文 HTTP/2（h2c，prior knowledge），内网服务间就不用再套 TLS 了。相关协议配置详见第 38 章。
 
-> ⚠️ HTTP/2 的 SSE 有个隐藏陷阱：**同一条 TCP 上如果有一个 stream 的接收端不读（背压），TCP 窗口会被占满，其它 stream 一起卡住**（head-of-line blocking 在传输层依然存在）。这就是 QUIC/WebTransport 想解决的问题。所以一个 Pod 上的 SSE 用户量特别大时，别指望「HTTP/2 多路复用」能救容量。
+> ⚠️ HTTP/2 的 SSE 有个隐藏陷阱：**如果应用停止消费某条流，该流的 HTTP/2 流控窗口先被占满；持续不消费还会耗尽连接级窗口，最终把 TCP 接收缓冲堵住，其他流也会被拖慢**。这是应用/流控层的背压，不是“每个包都按流排队”的传输 HOL；但它同样会牵连共享同一条连接的其他 SSE。QUIC 把流级排队与恢复做得更独立，Quic/WebTransport 仍是常见的解决方向。所以一个 Pod 上的 SSE 用户量特别大时，别指望「HTTP/2 多路复用」能无限救容量。
 
 ---
 
