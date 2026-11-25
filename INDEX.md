@@ -12,8 +12,9 @@
 | [`architect/`](architect/0-summary.md) | **系统设计**：从约束推导形态 → 5 个空白横切（灰度/风控/开放平台/多活/数据闭环）→ 8 族 14 个真实系统装配（短链 / IM 扇出 / 千万长连接 / 消息存储 vs Telegram / 检索三套索引 / 向量 / 推荐漏斗 / 数据迁移 / 秒杀库存 / 多租户底座 …），每篇死磕一个「唯一真问题」 | 26 章 / 71.2 万字符 | [总纲](architect/0-summary.md) |
 | [`comp/`](comp/0-summary.md) | **组件剖析**：解剖卡八问 + 三本放大账 → B+树/LSM/列存 → InnoDB（页/行/MVCC/锁/三份日志/优化器/复制）+ PG → Redis + 一致性哈希与 quorum → MongoDB/HBase/RocksDB+TiKV/ClickHouse → ES（倒排/段/分片/query vs filter/scroll/容量与重建）+ 向量索引与向量库 → Kafka（日志/ISR/消费组）+ 消息族谱/任务队列/CDC/Flink/Iceberg/时间轮 → ZK vs etcd/注册配置中心/网关入口/RPC/服务网格 → S3/事务组件/连接池/分布式 ID/分布式锁/密钥/可观测底座 → **Agent 栈（vLLM/LLM 网关/执行沙箱）** → 故障谱 + 53 张解剖卡合订。**内核形态如何决定架构边界** | 53 篇规划 / **53 篇全部完稿**（01–53） | [总纲](comp/0-summary.md) |
 | [`base/`](base/0-summary.md) | **计算机系统基座**：数据表示、CPU/GPU、Linux 内核、网络协议与安全 | 56 篇初稿，含 11 篇实例 | [导读](base/01-one-ruler.md) · [收口与 100 题自检](base/56-closing-ledger.md) |
+| [`fin/`](fin/0-summary.md) | **金融系统与智能交易架构（100% 独立成册）**：传统金融与数字货币/DeFi 机制（无代码）→ Go + Java 双栈账本、幂等、清结算、支付、OMS、撮合、行情、托管 → 金融 AI-Agent → 面试题库 | 48 章规划，写作中 | [总纲](fin/0-summary.md) |
 
-**一句话分工**：`base/` 解释硬件、内核与协议的基础机制；`llm_base/` 解释普通人怎么判断与验收 AI；`go/` 解释语言和运行时；`llm/` 讲平台治理；`eng/` 讲功能实现；`algo/` 讲解题思路；`architect/` 讲系统形态与装配；`comp/` 讲具体组件的内部结构。
+**一句话分工**：`base/` 解释硬件、内核与协议的基础机制；`llm_base/` 解释普通人怎么判断与验收 AI；`go/` 解释语言和运行时；`llm/` 讲平台治理；`eng/` 讲功能实现；`algo/` 讲解题思路；`architect/` 讲系统形态与装配；`comp/` 讲具体组件的内部结构；`fin/` 自成一册，讲金融机制、核心账务交易系统与金融 AI-Agent。
 
 ---
 

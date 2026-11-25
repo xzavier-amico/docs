@@ -8,7 +8,7 @@ SERIES=()
 for a in "$@"; do
   case "$a" in --*) ;; *) SERIES+=("$a") ;; esac
 done
-[ ${#SERIES[@]} -eq 0 ] && SERIES=(go llm eng algo architect comp base)
+[ ${#SERIES[@]} -eq 0 ] && SERIES=(go llm eng algo architect comp base fin)
 
 fail=0
 
@@ -242,6 +242,39 @@ PY3
 [ $? -ne 0 ] && fail=1
 else
   echo "  （跳过：未包含 algo）"
+fi
+
+echo
+echo "═══ 7. fin 专属检查（基础篇零代码 / 工程篇 Java+Go 双栈 / 独立性零跨系引用 / 图示）═══"
+if printf "%s\n" "${SERIES[@]}" | grep -qx "fin"; then
+python3 - <<'PY4'
+import os, re
+bad = 0
+files = [f for f in sorted(os.listdir("fin")) if re.match(r"^\d{2}-.+\.md$", f)]
+for fn in files:
+    n = int(fn.split("-")[0])
+    t = open(os.path.join("fin", fn), encoding="utf-8").read()
+    issues = []
+    tags = [m.strip().lower() for m in re.findall(r"^```(.*)$", t, re.M)]
+    opening = tags[0::2]
+    if n <= 19:
+        langs = [x for x in opening if x and x != "text"]
+        if langs: issues.append("基础篇出现代码围栏 " + ",".join(sorted(set(langs))))
+    else:
+        if not re.search(r"^```java\b", t, re.M): issues.append("缺 java 代码")
+        if not re.search(r"^```go\b", t, re.M):   issues.append("缺 go 代码")
+        fences = re.findall(r"^```text[^\n]*\n(.*?)^```", t, re.S | re.M)
+        if not any(re.search(r"[─│→↓┌└]", b) for b in fences): issues.append("缺 ASCII 图示")
+    plain = re.sub(r"```.*?```", "", t, flags=re.S)
+    if re.search(r"\]\(\.\./", plain): issues.append("含跨系列 ../ 链接")
+    if issues:
+        bad += 1
+        print(f"  ❌ {fn}: " + " / ".join(issues))
+print(f"  检查 {len(files)} 章，问题 {bad} 章")
+PY4
+[ $? -ne 0 ] && fail=1
+else
+  echo "  （跳过：未包含 fin）"
 fi
 
 echo

@@ -10,7 +10,7 @@ hide:
 
 本站按系列展示正文，每套都从第 1 章开始。
 
-## 八套文档
+## 九套文档
 
 | 系列 | 内容 | 规模 | 开始阅读 |
 | --- | --- | --- | --- |
@@ -22,11 +22,12 @@ hide:
 | **系统设计实战** | 从约束卡到真实系统：短链、IM、长连接、检索、推荐、迁移、秒杀、多租户 | 26 篇 / 71.2 万字符 | [第 1 篇 · 约束卡与容量](architect/01-constraint-card-and-capacity.md) |
 | **存储与中间件剖析** | InnoDB、PostgreSQL、Redis、MongoDB、HBase、RocksDB/TiKV、ClickHouse、ES、Kafka、vLLM | 53 篇初稿 | [第 1 篇 · 组件解剖方法](comp/01-component-anatomy-method.md) |
 | **计算机系统基座** | 从位与字节到 CPU/GPU、Linux 内核和网络协议；含 RingBuffer、GEMM、DNS 安全、TLS 与 HTTP/2 等机制与实例 | 56 篇初稿 / 11 篇实例 | [导读](base/01-one-ruler.md) · [收口与自检](base/56-closing-ledger.md) |
+| **金融系统与智能交易架构** | 传统金融与链上金融机制（无代码）→ Go + Java 双栈账本/幂等/清结算/支付/OMS/撮合/行情/托管 → 金融 AI-Agent（PIT RAG、防注入下单、MCP、DeFAI）→ 面试题库；100% 独立成册 | 48 章规划，写作中 | [导读 · 一把尺子](fin/01-four-primitives-and-five-redlines.md) |
 
 ## 阅读方式
 
 - **按系列顺序读**：从上面任意一套的第 1 章开始，侧栏会按章节顺序展开。
 - **按主题跳读**：每章开头都有「本章定位」和「读法」，先看这两段再决定是否继续。
-- **按岗位选路线**：`go/` 打语言与运行时地基，`llm/` 建平台架构，`eng/` 练功能实现，`algo/` 补算法直觉，`architect/` 学系统装配，`comp/` 拆组件内核，`base/` 补机器本身的物理底座（位、CPU、内核、协议栈），`llm_base/` 给非工程读者一套判断与验收 AI 的方法。
+- **按岗位选路线**：`go/` 打语言与运行时地基，`llm/` 建平台架构，`eng/` 练功能实现，`algo/` 补算法直觉，`architect/` 学系统装配，`comp/` 拆组件内核，`base/` 补机器本身的物理底座（位、CPU、内核、协议栈），`fin/` 自成一册讲金融机制、核心账务交易工程与金融 AI-Agent，`llm_base/` 给非工程读者一套判断与验收 AI 的方法。
 
 > 站点由 GitHub Actions 自动构建，每次 push 到 `main` 后自动更新。
