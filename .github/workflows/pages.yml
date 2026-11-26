@@ -37,6 +37,12 @@ jobs:
       - name: Prepare docs source
         run: python3 scripts/prepare-docs.py
 
+      - name: Check financial examples and math rendering
+        run: |
+          bash fin/check.sh
+          python3 fin/verify-examples.py
+          python3 scripts/test-fin-math.py
+
       - name: Build site
         run: mkdocs build
 

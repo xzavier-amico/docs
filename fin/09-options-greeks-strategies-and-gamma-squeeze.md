@@ -12,6 +12,8 @@
 
 ### 案例一：2021 年 1 月 GameStop（GME）伽马挤压与 2020 年「纳斯达克鲸」前奏
 
+> **因果校正**：下文正反馈是机制示意，不能由 Call 成交量推断做市商必然净短 Gamma，更不能把它当成 GME 暴涨已被证实的主要原因。SEC 的 [2021 年市场结构员工报告](https://www.sec.gov/files/staff-report-equity-options-market-struction-conditions-early-2021.pdf) 未发现 Gamma squeeze 足以解释 GME 价格走势的证据；净买卖方向、做市商库存与对冲行为要另行验证。历史股价、追保和买入限制是事件事实，模型归因则需与之区分。
+
 2020 年夏，软银旗下交易单元 **SB Northstar** 投入约 **`40 亿美元`** 权利金集中扫货美国科技龙头短期虚值看涨期权，撬动 **`300 亿至 500 亿美元`** 名义股票敞口（「纳斯达克鲸」）。做市商被动接盘后按动态 Delta 持续追买现货对冲，成为推升当年科技股急涨的重要推力。
 
 2021 年 1 月，这一结构在游戏驿站（GameStop，`GME`）上十倍爆发。1 月 4 日 GME 仅收 **`$17.25`**，机构空头持仓却超流通股本 `100%`。随散户涌入狂买低价短期虚值 Call，做市商沦为全市场净卖方并陷入深度**短伽马（Short Gamma）**。股价拉升叠加机构空头被迫回补（Short Squeeze）时，做市商的看涨 Delta 陡峭攀升，不得不在盘口卖盘枯竭时市价追买 GME 正股对冲。双买盘正反馈共振下，GME 于 **1 月 27 日** 收报 **`$347.51`**（单日暴涨逾 `134%`），**1 月 28 日** 盘中最高触及 **`$483.00`**（约合年初 **`28 倍`**）。剧烈波动击穿常规风控模型，美国国家证券清算公司（NSCC）于 1 月 28 日盘前向 Robinhood 发出约 **`30 亿美元`** 紧急追保通知，迫使后者紧急融资并临时限制买入通道。
@@ -114,20 +116,22 @@
 
 ### 一、一阶五维与二阶交叉 Greeks 完整风险账本
 
-设 $V(S, t, \sigma, r)$ 为无分红欧式期权（$q=0$）现价，$N'(\cdot)$ 为标准正态密度。八大核心 Greeks 的定义与符号规律如下：
+设 $V(S, t, \sigma, r)$ 为无分红欧式期权（$q=0$）现价，$N'(\cdot)$ 为标准正态密度。下表先给出原始偏导定义，再给出本章算例采用的工程缩放口径：Theta 按自然日展示（年化偏导除以 `365`），Vega/Rho 按波动率或利率**每 1 个百分点**展示（原始偏导乘以 `0.01`）。因此 Taylor 展开中若使用表格数值，$\Delta\sigma$、$\Delta r$ 必须用百分点数（例如 `4` 表示 `4%`）；若使用原始 Greeks，则必须用小数（例如 `0.04`），不能混用。
 
 | 希腊字母 | 偏导定义 | 工程口径 | 多头 Call | 多头 Put | 解析式与金融直觉（无分红欧式） |
 | --- | --- | --- | --- | --- | --- |
 | **Delta ($\Delta$)** | $\frac{\partial V}{\partial S}$ | 标的变 `$1` 变动 | **`+`** (`0~1`) | **`-`** (`-1~0`) | Call 为 $N(d_1)$，Put 为 $N(d_1)-1$；一阶方向与对冲比率 |
 | **Gamma ($\Gamma$)** | $\frac{\partial^2 V}{\partial S^2}$ | 标的变 `$1` 之 $\Delta$ 增量 | **`+`** | **`+`** | $\frac{N'(d_1)}{S\sigma\sqrt{T}}$；平值最大，决定调仓频率 |
-| **Theta ($\Theta$)** | $\frac{\partial V}{\partial t}$ | 每自然日损耗 | **`-`** | 通常 **`-`** | 时间租金流逝；深实值欧式 Put 极高利率下可为正 |
-| **Vega ($\mathcal{V}$)** | $\frac{\partial V}{\partial \sigma}$ | IV 升 `+1%` (`0.01`) | **`+`** | **`+`** | $S N'(d_1)\sqrt{T} \times 0.01$；平值与长期限最大，0DTE 归零 |
-| **Rho ($\rho$)** | $\frac{\partial V}{\partial r}$ | 利率升 `+1%` (`0.01`) | **`+`** | **`-`** | $\pm K T e^{-rT} N(\pm d_2)\times 0.01$；资金利息成本 |
-| **Vanna** | $\frac{\partial^2 V}{\partial S \partial \sigma}$ | $\Delta$ 随 $\sigma$ 漂移 | OTM **`+`** / ITM **`-`** | ITM **`+`** / OTM **`-`** | $-\frac{N'(d_1)d_2}{\sigma}$；股价与 IV 同向跳变时撕裂中性 |
-| **Charm** | $\frac{\partial^2 V}{\partial S \partial t}$ | 每日 $\Delta$ 衰减 | OTM **`-`** / ITM **`+`** | OTM **`+`** / ITM **`-`** | $-\frac{N'(d_1)(2rT-d_2\sigma\sqrt{T})}{2T\sigma\sqrt{T}}/365$；驱动尾盘对冲流 |
-| **Volga** | $\frac{\partial^2 V}{\partial \sigma^2}$ | $\mathcal{V}$ 随 $\sigma$ 凸性 | OTM/ITM **`+`** | OTM/ITM **`+`** | $\mathcal{V}_{\text{raw}}\frac{d_1 d_2}{\sigma}$；两翼对「波动率的波动」溢价 |
+| **Theta ($\Theta$)** | $\frac{\partial V}{\partial t}$（按年） | 工程展示为每自然日：$\Theta_{day}=\Theta_{year}/365$ | **`-`** | 通常 **`-`** | 时间租金流逝；深实值欧式 Put 极高利率下可为正 |
+| **Vega ($\mathcal{V}$)** | $\frac{\partial V}{\partial \sigma}$（原始） | IV 升 `+1` 个百分点 | **`+`** | **`+`** | $\mathcal{V}_{1\%}=S N'(d_1)\sqrt{T}\times0.01$；平值与长期限最大，0DTE 归零 |
+| **Rho ($\rho$)** | $\frac{\partial V}{\partial r}$（原始） | 利率升 `+1` 个百分点 | **`+`** | **`-`** | $\rho_{1\%}=\pm K T e^{-rT}N(\pm d_2)\times0.01$；资金利息成本 |
+| **Vanna** | $\frac{\partial^2 V}{\partial S \partial \sigma}$（对原始小数波动率） | 本章交叉项保持 raw 口径，乘 `0.04` 而不是 `4` | 依 $d_2$ 符号 | 同行权价 Call/Put 相同 | $-\frac{N'(d_1)d_2}{\sigma}$；若改成每百分点，数值须乘 `0.01` |
+| **Charm** | $\frac{\partial^2 V}{\partial S \partial t}$，$t$ 为已逝时间 | 本章按日展示 | 依参数和期限 | 相同参数下与 Call 相同 | $-\frac{N'(d_1)(2rT-d_2\sigma\sqrt{T})}{2T\sigma\sqrt{T}}/365$；不是 Call/Put 符号相反 |
+| **Volga** | $\frac{\partial^2 V}{\partial \sigma^2}$（原始） | $\mathcal{V}$ 随 $\sigma$ 凸性 | OTM/ITM **`+`** | OTM/ITM **`+`** | $\mathcal{V}_{\text{raw}}\frac{d_1 d_2}{\sigma}$；使用每百分点 Vega 时要同时换算二阶项 |
 
 组合在单步 $(\Delta S, \Delta t, \Delta\sigma, \Delta r)$ 内的**二阶多变量泰勒归因方程**：
+
+**下面的导数式统一按 raw 口径书写**：$t$ 以年计，$\sigma,r$ 是小数；使用随后表格中的每日 Theta、每百分点 Vega/Rho 时，分别乘日数、波动率百分点和利率百分点。Vanna/Volga 保持 raw，分别乘 `0.04` 和 `0.04²`；Charm 已除 `365`，乘日数。BSM PDE 中的 Theta 必须使用年化值，不能直接代入每日 Theta。Call 与 Put 在相同 $(S,K,T,\sigma,r)$ 下由平价关系可知其 Vanna/Charm 相同，符号并非仅由“实值/虚值”二分决定。
 $$\Delta \Pi_{\text{归因}} \approx \Delta_{\text{net}}\Delta S + \frac{1}{2}\Gamma_{\text{net}}(\Delta S)^2 + \Theta_{\text{net}}\Delta t + \mathcal{V}_{\text{net}}\Delta\sigma + \rho_{\text{net}}\Delta r + \text{Vanna}_{\text{net}}\Delta S\,\Delta\sigma + \text{Charm}_{\text{net}}\Delta S\,\Delta t + \frac{1}{2}\text{Volga}_{\text{net}}(\Delta\sigma)^2$$
 
 ### 二、连续三日股价、波动率与利率跳变下的完整损益归因算例（教学推演案例）
